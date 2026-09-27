@@ -275,6 +275,8 @@ def test_research_insights_aggregate_and_validate_figures(workspace):
     assert "sandbox" in svg_response.headers["content-security-policy"]
     assert b"script" not in svg_response.content
     assert b"onload" not in svg_response.content
+    (app.state.store.workspace(pid) / ".hidden.png").write_bytes(b"\x89PNG\r\n\x1a\nprivate")
+    assert owner.get(f"/api/projects/{pid}/artifact?path=.hidden.png&inline=1").status_code == 400
     assert owner.post(
         root + "/research",
         json={"figures": [{"title": "Unsafe", "path": "../outside.png"}]},

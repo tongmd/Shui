@@ -166,7 +166,7 @@ def safe_artifact(root: Path, relative: str, directory=False):
     if (
         path.is_absolute()
         or ".." in path.parts
-        or any(p in FORBIDDEN_NAMES or p.startswith(".env") for p in path.parts)
+        or any(p in FORBIDDEN_NAMES or p.startswith(".") for p in path.parts)
     ):
         raise HTTPException(400, "Invalid project path")
     target = root / path
