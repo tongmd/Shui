@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import sysconfig
 import time
@@ -819,6 +820,65 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                 c, pid, "project.updated", {"project": out, "actor": u["username"]}
             )
             return out
+
+    @app.delete("/api/projects/{pid}")
+    async def project_delete(pid: str, request: Request):
+        actor, _ = access(request, pid, True, True)
+        data = await body(request)
+        confirmation = textfield(data, "confirm_name", 120)
+        with store.connect() as c:
+            project = c.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+            if not project:
+                raise HTTPException(404, "Project not found")
+            if confirmation != project["name"]:
+                raise HTTPException(400, "Type the exact project name to delete it")
+            c.execute("BEGIN IMMEDIATE")
+            c.execute(
+                "UPDATE projects SET status='error',updated_at=? WHERE id=?",
+                (now(), pid),
+            )
+            c.execute(
+                "UPDATE turns SET status='cancelled',finished_at=? WHERE project_id=? AND status='queued'",
+                (now(), pid),
+            )
+            c.execute(
+                "UPDATE messages SET status='cancelled' WHERE turn_id IN (SELECT id FROM turns WHERE project_id=? AND status='cancelled')",
+                (pid,),
+            )
+            for tid, event in list(coordinator.cancels.items()):
+                if c.execute(
+                    "SELECT 1 FROM turns WHERE id=? AND project_id=?", (tid, pid)
+                ).fetchone():
+                    event.set()
+            running = c.execute(
+                "SELECT 1 FROM turns WHERE project_id=? AND status='running'", (pid,)
+            ).fetchone()
+            task = coordinator.tasks.get(pid) if running else None
+        if task:
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=20)
+            except asyncio.TimeoutError:
+                raise HTTPException(
+                    409, "The active task is still stopping; try again shortly"
+                )
+        with store.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            project = c.execute("SELECT id FROM projects WHERE id=?", (pid,)).fetchone()
+            if not project:
+                return {"ok": True, "deleted": pid}
+            for table in (
+                "presence",
+                "bridge_state",
+                "events",
+                "files",
+                "turns",
+                "messages",
+                "members",
+            ):
+                c.execute(f"DELETE FROM {table} WHERE project_id=?", (pid,))
+            c.execute("DELETE FROM projects WHERE id=?", (pid,))
+        shutil.rmtree(store.workspace(pid), ignore_errors=True)
+        return {"ok": True, "deleted": pid, "actor": actor["username"]}
 
     @app.get("/api/projects/{pid}/messages")
     async def messages(

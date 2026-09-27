@@ -1,6 +1,6 @@
 # Shui!
 
-<img src="web/icon.png" alt="TongLab" width="64" height="64">
+<img src="web/icon.png" alt="Shui!" width="64" height="64">
 
 One paper, one project, one shared Codex or Claude Code conversation.
 
@@ -138,4 +138,4 @@ while the service is stopped.
 See [deployment](docs/DEPLOYMENT.md), [API contract](docs/API_CONTRACT.md), and
 [agent protocol details](docs/AGENT_PROTOCOLS.md).
 
-The icon is the existing TongLab icon. This is a private TongLab project.
+The interface uses the bundled colorful brain icon.

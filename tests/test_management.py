@@ -218,3 +218,33 @@ def test_primary_owner_and_self_management_are_protected(team):
         == 200
     )
     assert other.get("/api/users").status_code == 403
+
+
+def test_owner_can_delete_project_only_with_exact_name_and_workspace_is_removed(team):
+    app, owner, editor, _, _, _, _, one, two = team
+    pid = one["id"]
+    assert (
+        owner.request(
+            "DELETE", f"/api/projects/{pid}", json={"confirm_name": "wrong"}
+        ).status_code
+        == 400
+    )
+    assert owner.get(f"/api/projects/{pid}").status_code == 200
+    assert editor.get(f"/api/projects/{pid}").status_code == 404
+    queued = owner.post(
+        f"/api/projects/{pid}/messages",
+        json={"content": "queued", "client_id": "delete-queued"},
+    ).json()["turn"]
+    response = owner.request(
+        "DELETE", f"/api/projects/{pid}", json={"confirm_name": one["name"]}
+    )
+    assert response.status_code == 200, response.text
+    assert owner.get(f"/api/projects/{pid}").status_code == 404
+    assert not app.state.store.workspace(pid).exists()
+    with app.state.store.connect() as c:
+        assert c.execute("SELECT 1 FROM projects WHERE id=?", (pid,)).fetchone() is None
+        assert (
+            c.execute("SELECT 1 FROM turns WHERE id=?", (queued["id"],)).fetchone()
+            is None
+        )
+    assert owner.get(f"/api/projects/{two['id']}").status_code == 200
