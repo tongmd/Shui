@@ -1,0 +1,120 @@
+# Shui!
+
+<img src="web/icon.png" alt="TongLab" width="64" height="64">
+
+One paper, one project, one shared Codex or Claude Code conversation.
+
+Shui gives a research team a shared transcript, file uploads, live agent output,
+and an ordered task queue. Each message records its author. Every collaborator
+continues the project's existing native agent conversation. Projects run in
+parallel; turns within a project run in order.
+
+## Start locally
+
+Requires Python 3.11+ on macOS or Linux, and at least one installed, signed-in
+`codex` or `claude` CLI. Use the same host account for CLI login and Shui.
+
+```sh
+git clone git@github.com:tongmd/Shui.git
+cd Shui
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/shui init-owner --username owner --display-name Owner --generate-password
+.venv/bin/shui serve
+```
+
+The committed `uv.lock` records the tested dependency resolution. With `uv`
+installed, `uv sync --frozen --extra dev` can replace the virtual-environment
+creation and pip installation steps above.
+
+Open <http://127.0.0.1:18940>. The bootstrap command prints the location of a
+private `owner-login.txt` file, readable only by the host account. It never
+prints the generated password. Alternatively, omit `--generate-password` to
+choose a password interactively. `SHUI_OWNER_PASSWORD` can supply a password
+for unattended bootstrap and is removed from the CLI environment after reading.
+
+The owner has access to every project and can create accounts, assign project
+members, configure models, and cancel any project turn. Members can be editors
+or viewers. An editor can submit tasks and uploads; a viewer can read and download.
+
+## Shared sessions and execution
+
+- Create one project per paper, then add the collaborators to that project.
+- Choose Codex or Claude Code. An optional existing native session ID binds the
+  project to that conversation. Otherwise the first message creates the native
+  conversation and saves its ID before submitting the task.
+- All project agents run with full host-account permissions. Codex uses
+  `danger-full-access` and no approvals. Claude uses `bypassPermissions`.
+  Agents can edit files and run experiments using the host's available tools,
+  credentials and SSH configuration.
+- File uploads only store files. A later, explicit task can ask the agent to
+  read or use an attachment. Uploading does not execute it.
+- Failed or interrupted turns pause the remaining queue. A new request or
+  explicit retry resumes processing. Retry is never automatic because an
+  interrupted experiment may already have made changes.
+- A session resume failure stays visible. Shui never silently creates a
+  replacement conversation or switches providers. A bound session cannot be
+  reassigned to another project.
+
+Full access means the permissions of the operating-system account running Shui.
+It does not add root privileges. Project membership limits the web interface;
+it is not filesystem isolation between trusted collaborators' agent tasks.
+Native CLI histories stay on the host. When binding an existing conversation,
+the agent retains that context; Shui's transcript starts with messages sent
+through Shui. Do not simultaneously send turns to a bound session from another
+CLI or application.
+
+## Configuration
+
+Environment variables are read from the process environment. `.env.example`
+documents the settings; Shui does not automatically load `.env` files.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SHUI_DATA_DIR` | `~/.local/share/shui` | SQLite database and project workspaces |
+| `SHUI_HOST` | `127.0.0.1` | Web listen address |
+| `SHUI_PORT` | `18940` | Web port |
+| `SHUI_PUBLIC_ORIGIN` | `http://127.0.0.1:18940` | Exact browser origin, including scheme and port |
+| `SHUI_PROXY_URL` | `http://127.0.0.1:7890` with `shui serve` | Required proxy for agent child processes |
+| `SHUI_CODEX_MODEL` | `gpt-5.5` | Default Codex model; project settings take precedence |
+| `SHUI_CODEX_BIN` | `codex` | Executable name or absolute path |
+| `SHUI_CLAUDE_BIN` | `claude` | Executable name or absolute path |
+| `SHUI_AGENT_TIMEOUT_SECONDS` | `3600` | Maximum time for one agent turn, up to 86400 |
+| `SHUI_AGENT_IDLE_TIMEOUT_SECONDS` | `600` | Maximum silence between CLI protocol messages |
+| `SHUI_PROJECT_UPLOAD_QUOTA` | `5368709120` | Total uploaded bytes per project |
+
+Agent subprocesses inherit the proxy through upper- and lower-case
+`HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY`. Only loopback is in `NO_PROXY`.
+The service fails an agent launch if the proxy setting is missing or invalid.
+Environment variables configure routing; software that ignores them needs a
+host-level network rule when enforced proxy routing is required.
+
+Each upload is limited to 50 MiB. Project artifacts and PDFs are available from
+the files panel. Authentication uses password hashes and HttpOnly cookies;
+mutating requests require a CSRF token. Use HTTPS when exposing Shui remotely.
+Native CLI credentials remain on the host. Keep its data directory and CLI
+configuration out of Git.
+
+## Administration
+
+```sh
+# Run with another data directory and port.
+SHUI_PUBLIC_ORIGIN=http://127.0.0.1:18941 \
+  .venv/bin/shui --data-dir /path/on/ssd/shui serve --port 18941
+
+# Password recovery also signs that account out of every browser.
+.venv/bin/shui reset-password owner
+
+# Run the regression tests without real model calls.
+.venv/bin/python -m pytest -q
+```
+
+Run one web worker per data directory. Different projects can still execute
+concurrently. Persistent process and session locks reject competing Shui
+workers. Back up the database, workspaces, and native CLI histories together
+while the service is stopped.
+
+See [deployment](docs/DEPLOYMENT.md), [API contract](docs/API_CONTRACT.md), and
+[agent protocol details](docs/AGENT_PROTOCOLS.md).
+
+The icon is the existing TongLab icon. This is a private TongLab project.

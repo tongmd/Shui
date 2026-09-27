@@ -1,0 +1,88 @@
+# Deployment
+
+## Host
+
+Use a macOS or Linux account with the intended experiment permissions. Install
+the two provider CLIs, sign in as that account, and confirm the selected model
+is available. A CLI binary being present is not a login or quota check.
+
+Install Shui from this private repository into a virtual environment. Keep
+`SHUI_DATA_DIR` on persistent local SSD storage, outside the source checkout.
+SQLite and the agent session files need a single host with working file locks.
+For multiple GPU machines, agents can use the host account's SSH setup; Shui
+does not allocate GPUs or distribute experiments automatically.
+
+## Linux service
+
+Adapt `deploy/shui.service` to the host username, checkout and SSD paths. The
+service must run as the account with the CLI subscriptions and SSH access.
+Initialize the owner using that same account and `SHUI_DATA_DIR` before starting.
+The unit intentionally leaves host execution unrestricted, as selected by the
+owner. It still keeps its files private with a restrictive umask.
+
+Place environment settings in `/etc/shui.env`, readable only by the service
+account and root. Set PATH to include the installed Codex and Claude binaries,
+or use their absolute paths in `SHUI_CODEX_BIN` and `SHUI_CLAUDE_BIN`.
+
+```ini
+SHUI_DATA_DIR=/var/lib/shui
+SHUI_PUBLIC_ORIGIN=https://shui.example.org
+SHUI_PROXY_URL=http://127.0.0.1:7890
+SHUI_CODEX_BIN=/home/research/.local/bin/codex
+SHUI_CLAUDE_BIN=/home/research/.local/bin/claude
+```
+
+```sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now shui
+sudo journalctl -u shui -f
+```
+
+## HTTPS and live output
+
+For macOS, adapt `deploy/org.shui.app.plist.example` and place it at
+`~/Library/LaunchAgents/org.shui.app.plist`. Create the private data directory
+and bootstrap the owner first, then load the agent with
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.shui.app.plist`.
+It will remain running and start again when the user logs in. Keep the Mac awake
+when collaborators need continuous access.
+
+Put an HTTPS reverse proxy in front of `127.0.0.1:18940`. The configured public
+origin must exactly match the URL collaborators open. HTTPS origins enable
+secure cookies. Do not cache authenticated routes or buffer event streams.
+
+Example Caddy configuration:
+
+```caddyfile
+shui.example.org {
+    request_body {
+        max_size 51MB
+    }
+    reverse_proxy 127.0.0.1:18940 {
+        flush_interval -1
+    }
+}
+```
+
+For Nginx set `client_max_body_size 51m`, `proxy_buffering off`,
+`proxy_read_timeout 3600s`, and forward the original Host header. Shui's SSE
+endpoint emits a heartbeat every 15 seconds and can replay persisted events.
+Use one Uvicorn worker. An additional worker will fail its exclusive data lock.
+
+## Updates and recovery
+
+Stop the service before taking a consistent backup. Include the entire data
+directory, `~/.codex` and `~/.claude` native histories, and keep the backup
+private because it contains research, login sessions and credentials. Provider
+authentication may need to be refreshed on a replacement host.
+
+After an abrupt restart, running turns become interrupted and are never
+automatically repeated. Inspect the experiment's files/processes before retrying.
+Queued work behind a failed project stays paused until a new request or retry.
+Changing a bound native session is deliberately rejected; create another
+project when starting a separate conversation.
+
+The service includes no public registration. Invite collaborators by creating
+their account as Owner and assigning their project role. Password recovery is
+available locally with `shui reset-password USERNAME`, which revokes old web
+sessions. Do not commit `.env`, databases, owner-login files, or native credentials.

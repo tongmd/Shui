@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f5f3ec">
+  <title>Shui! · Research together</title>
+  <link rel="icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/styles.css">
+  <script defer src="/lucide-icons.js"></script>
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div id="boot" class="boot"><img src="/icon.png" alt="" width="54" height="54"><span>Shui!</span><p>正在打开工作空间…</p></div>
+  <section id="login-view" class="login-view" hidden>
+    <div class="login-story"><a class="brand" href="/" aria-label="Shui! 首页"><img src="/icon.png" alt="TongLab" width="46" height="46"><span>Shui<span class="brand-bang">!</span></span></a></div>
+    <div class="login-form-wrap"><form id="login-form" class="login-form"><h2>登录工作空间</h2><label>账号<input id="login-username" name="username" autocomplete="username" required placeholder="用户名"></label><label>密码<input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="密码"></label><p id="login-error" class="form-error" role="alert" hidden></p><button class="btn primary login-submit" type="submit">登录</button></form></div>
+  </section>
+  <div id="app" class="app" hidden>
+    <button id="drawer-scrim" class="drawer-scrim" aria-label="关闭侧栏" hidden></button>
+    <aside id="sidebar" class="sidebar" aria-label="项目导航">
+      <div class="sidebar-brand"><a class="brand" href="/" aria-label="Shui! 首页"><img src="/icon.png" alt="TongLab" width="42" height="42"><span>Shui<span class="brand-bang">!</span></span></a><button id="close-sidebar" class="icon-btn mobile-only" aria-label="关闭项目导航" data-icon="close"></button></div>
+      <div class="workspace-label">Owner Lab</div>
+      <div class="project-section-title"><span>研究项目</span><button id="create-project" class="icon-btn" title="新建项目" aria-label="新建项目" data-icon="plus" hidden></button></div>
+      <div class="search-box"><span data-icon="search"></span><input id="project-search" type="search" placeholder="查找项目…" aria-label="查找项目"></div>
+      <nav id="project-list" class="project-list" aria-label="项目列表"></nav>
+      <div class="sidebar-bottom"><button id="manage-users" class="quiet-btn owner-users" hidden><span data-icon="users"></span>团队账号</button><div class="user-row"><span id="user-avatar" class="avatar"></span><div class="user-details"><strong id="user-name"></strong><small id="user-role"></small></div><button id="logout" class="icon-btn" title="退出登录" aria-label="退出登录" data-icon="logout"></button></div></div>
+    </aside>
+    <main id="main" class="main">
+      <header class="topbar"><button id="open-sidebar" class="icon-btn mobile-only" aria-label="打开项目导航" data-icon="menu"></button><div class="breadcrumb">工作空间 <span>/</span> <span id="breadcrumb-project">概览</span></div><div id="connection" class="connection"><span class="status-dot"></span><span id="connection-text">正在连接</span></div><button id="open-inspector" class="icon-btn inspector-toggle" aria-label="打开项目资料" data-icon="panel"></button></header>
+      <section id="welcome" class="welcome"><div class="empty-mark" data-icon="folder"></div><h1>暂无研究项目</h1><button id="welcome-create" class="btn primary" hidden><span data-icon="plus"></span>新建项目</button></section>
+      <section id="project-view" class="project-view" hidden>
+        <div class="project-header"><div class="project-heading"><h1 id="project-title"></h1><p id="project-description" class="project-description"></p><div class="project-meta"><span id="provider-pill" class="provider-pill"></span><span id="project-status" class="project-state"></span><span id="project-model" class="model-label"></span></div></div><div class="project-header-actions"><div id="presence" class="presence" aria-label="在线成员"></div><button id="project-settings" class="icon-btn outlined" title="项目设置" aria-label="项目设置" data-icon="settings" hidden></button></div></div>
+        <div id="queue-banner" class="queue-banner" hidden><span class="pulse-dot"></span><span id="queue-label"></span><button id="cancel-active" class="quiet-btn" hidden>停止当前任务</button></div>
+        <div id="project-error" class="inline-notice error" role="alert" hidden></div>
+        <div id="conversation" class="conversation" tabindex="0" aria-label="共享对话"><div class="history-top"><button id="load-history" class="quiet-btn" hidden><span data-icon="history"></span>加载更早的消息</button></div><div id="messages" class="messages"></div><div id="conversation-empty" class="conversation-empty"><div class="empty-mark" data-icon="notebook"></div><h2>暂无消息</h2></div></div>
+        <button id="jump-latest" class="jump-latest" hidden><span data-icon="down"></span>回到最新消息</button>
+        <div class="composer-wrap"><div id="upload-list" class="upload-list" aria-live="polite"></div><form id="composer" class="composer"><textarea id="message-input" rows="2" placeholder="发送消息…" aria-label="消息内容"></textarea><div class="composer-bottom"><div class="composer-tools"><button id="attach-button" type="button" class="icon-btn" title="上传文件（最大 50 MB）" aria-label="添加附件" data-icon="clip"></button><span id="composer-context" class="composer-context">共享对话</span></div><button id="send-message" class="send-btn" type="submit" title="发送（Ctrl / ⌘ + Enter）"><span>发送</span><span data-icon="arrow"></span></button></div></form><input id="file-input" type="file" multiple hidden><div class="composer-foot"><span id="composer-note"></span></div></div>
+      </section>
+    </main>
+    <aside id="inspector" class="inspector" aria-label="项目资料"><div class="inspector-heading"><span class="eyebrow">PROJECT NOTEBOOK</span><button id="close-inspector" class="icon-btn inspector-close" aria-label="关闭项目资料" data-icon="close"></button></div><div class="inspector-tabs" role="tablist"><button id="tab-files" class="active" role="tab" aria-selected="true" data-tab="files">文件</button><button id="tab-activity" role="tab" aria-selected="false" data-tab="activity">动态</button><button id="tab-members" role="tab" aria-selected="false" data-tab="members">成员</button></div><div id="inspector-empty" class="inspector-empty"><span data-icon="notebook"></span><p>项目的资料与进展<br>会在这里汇集。</p></div><section id="panel-files" class="inspector-panel" role="tabpanel" hidden><div class="panel-section-head"><h3>共享文件</h3><button id="refresh-files" class="icon-btn" aria-label="刷新文件" title="刷新文件" data-icon="refresh"></button></div><div id="shared-files" class="file-list"></div><div class="panel-section-head artifact-heading"><h3>工作成果</h3><button id="refresh-workspace" class="icon-btn" aria-label="刷新工作成果" title="刷新工作成果" data-icon="refresh"></button></div><div id="workspace-path" class="workspace-path"></div><div id="workspace-files" class="file-list"></div></section><section id="panel-activity" class="inspector-panel" role="tabpanel" hidden><div class="panel-section-head"><h3>最近的推进</h3><button id="refresh-activity" class="icon-btn" aria-label="刷新动态" data-icon="refresh"></button></div><div id="activity-list" class="activity-list"></div></section><section id="panel-members" class="inspector-panel" role="tabpanel" hidden><div class="panel-section-head"><h3>共同研究</h3><button id="add-member" class="icon-btn" title="添加成员" aria-label="添加成员" data-icon="plus" hidden></button></div><p class="panel-caption">在线状态来自当前打开的工作空间。</p><div id="member-list" class="member-list"></div></section><div class="inspector-footer">ONE CONVERSATION. SHARED PROGRESS.</div></aside>
+  </div>
+  <dialog id="form-dialog" class="dialog"><div class="dialog-header"><div><span id="dialog-eyebrow" class="eyebrow">WORKSPACE</span><h2 id="dialog-title"></h2></div><button id="close-dialog" class="icon-btn" aria-label="关闭窗口" data-icon="close"></button></div><form id="dialog-form"><div id="dialog-body"></div><p id="dialog-error" class="form-error" role="alert" hidden></p><div class="dialog-footer"><button id="dialog-cancel" type="button" class="btn secondary">取消</button><button id="dialog-submit" type="submit" class="btn primary">保存</button></div></form></dialog>
+  <dialog id="preview-dialog" class="dialog preview-dialog"><div class="dialog-header"><h2 id="preview-title"></h2><div class="preview-actions"><a id="preview-download" class="quiet-btn" download>下载 <span data-icon="download"></span></a><button id="close-preview" class="icon-btn" aria-label="关闭预览" data-icon="close"></button></div></div><iframe id="pdf-preview" title="PDF 预览"></iframe><p class="preview-help">无法显示预览时，可下载文件后查看。</p></dialog>
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+</body>
+</html>

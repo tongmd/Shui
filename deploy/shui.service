@@ -1,0 +1,18 @@
+[Unit]
+Description=Shui shared research sessions
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=research
+WorkingDirectory=/opt/Shui
+EnvironmentFile=/etc/shui.env
+ExecStart=/opt/Shui/.venv/bin/shui serve
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

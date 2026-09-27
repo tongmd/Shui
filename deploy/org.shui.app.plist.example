@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>org.shui.app</string>
+  <key>ProgramArguments</key>
+  <array><string>/absolute/path/to/Shui/.venv/bin/shui</string><string>serve</string></array>
+  <key>WorkingDirectory</key><string>/absolute/path/to/Shui</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>SHUI_DATA_DIR</key><string>/absolute/path/to/private/shui-data</string>
+    <key>SHUI_PROXY_URL</key><string>http://127.0.0.1:7890</string>
+    <key>SHUI_PUBLIC_ORIGIN</key><string>http://127.0.0.1:18940</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>Umask</key><integer>63</integer>
+  <key>StandardOutPath</key><string>/absolute/path/to/private/shui-data/service.log</string>
+  <key>StandardErrorPath</key><string>/absolute/path/to/private/shui-data/service.log</string>
+</dict>
+</plist>
