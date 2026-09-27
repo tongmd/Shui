@@ -889,6 +889,20 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                 ]
             }
 
+    @app.get("/api/projects/{pid}/event-batch")
+    async def event_batch(pid: str, request: Request, after: int = 0):
+        access(request, pid)
+        with store.connect() as c:
+            rows = c.execute(
+                "SELECT * FROM events WHERE project_id=? AND id>? ORDER BY id LIMIT 200",
+                (pid, max(0, after)),
+            ).fetchall()
+        return {
+            "events": [
+                {**dict(row), "payload": json.loads(row["payload"])} for row in rows
+            ]
+        }
+
     @app.get("/api/projects/{pid}/events")
     async def events(pid: str, request: Request, after: int = 0):
         access(request, pid)

@@ -401,3 +401,26 @@ async def test_sse_invalid_cursor_is_rejected(workspace):
     with pytest.raises(HTTPException) as exc:
         await route.endpoint(pid, request)
     assert exc.value.status_code == 400
+
+
+def test_event_batch_replays_deltas_without_cross_project_leaks(workspace):
+    app, clients, users, pid = workspace
+    owner, editor = clients["owner"], clients["editor"]
+    other = owner.post("/api/projects", json={"name": "Other paper"}).json()["id"]
+    with app.state.store.connect() as c:
+        cursor = app.state.store.event(c, pid, "prior", {})
+        app.state.store.event(c, other, "agent.delta", {"delta": "private"})
+        next_id = app.state.store.event(c, pid, "agent.delta", {"delta": "shared"})
+    path = f"/api/projects/{pid}/event-batch"
+    result = editor.get(path, params={"after": cursor})
+    assert result.status_code == 200
+    assert [(e["id"], e["payload"]["delta"]) for e in result.json()["events"]] == [
+        (next_id, "shared")
+    ]
+    assert editor.get(path, params={"after": next_id}).json()["events"] == []
+    with app.state.store.connect() as c:
+        c.execute(
+            "DELETE FROM members WHERE project_id=? AND user_id=?",
+            (pid, users["editor"]["id"]),
+        )
+    assert editor.get(path).status_code == 404

@@ -53,7 +53,7 @@
     return data;
   }
   function setConnection(mode, text) { state.liveConnected = mode === 'connected'; $('connection').className = `connection ${mode}`; $('connection-text').textContent = text; }
-  function stopEvents() { if (state.source) state.source.close(); state.source = null; clearTimeout(state.reconnectTimer); state.reconnectTimer = null; clearTimeout(state.metaTimer); state.metaTimer = null; clearInterval(state.heartbeat); state.heartbeat = null; }
+  function stopEvents() { if (state.source) state.source.close(); state.source = null; clearTimeout(state.pollTimer); state.pollTimer = null; clearTimeout(state.reconnectTimer); state.reconnectTimer = null; clearTimeout(state.metaTimer); state.metaTimer = null; clearInterval(state.heartbeat); state.heartbeat = null; }
   function showLogin() { stopEvents(); state.user = null; state.csrf = null; state.project = null; state.epoch++; $('boot').hidden = true; $('app').hidden = true; $('login-view').hidden = false; if ($('form-dialog').open) $('form-dialog').close(); if ($('preview-dialog').open) $('preview-dialog').close(); closeDrawers(); $('login-password').value = ''; }
   async function startSession(session) {
     state.user = session.user; state.csrf = session.csrf; state.providers = session.providers || [];
@@ -86,7 +86,7 @@
       });
       if (d.project.active_turn) state.turns.set(String(d.project.active_turn.id), d.project.active_turn);
       state.projectLoading = false; state.historyMore = (d.messages || []).length >= 100; stored('shui-project', id); updateProjectInList(d.project); renderHeader(); renderMessages(); renderFiles(); renderMembers(); renderTab(); updateComposer(); scrollBottom();
-      connectEvents(epoch); heartbeat(epoch); state.heartbeat = setInterval(() => heartbeat(epoch), 25000); loadWorkspace(''); loadActivity();
+      connectEvents(epoch); state.lastStreamEvent = 0; state.lastMetaPoll = 0; pollEvents(epoch); heartbeat(epoch); state.heartbeat = setInterval(() => heartbeat(epoch), 25000); loadWorkspace(''); loadActivity();
     } catch (err) { if (epoch !== state.epoch) return; state.projectLoading = false; $('messages').replaceChildren(); $('project-error').replaceChildren(el('span', '', err.message), button('重试', 'quiet-btn', () => { state.project = null; selectProject(id); }, 'refresh')); $('project-error').hidden = false; setConnection('', '未连接'); updateComposer(); }
   }
   function updateProjectInList(p) { const i = state.projects.findIndex(x => x.id === p.id); if (i >= 0) state.projects[i] = { ...state.projects[i], ...p }; else state.projects.unshift(p); renderProjects(); }
@@ -208,10 +208,36 @@
   function renderActivity() { const list = state.activity.filter(e => !['presence', 'agent.delta', 'message.updated'].includes(e.type)).slice(-70).reverse(); $('activity-list').replaceChildren(); if (!list.length) $('activity-list').append(el('p', 'empty-small', '研究的每一步，会在这里留下记录。')); list.forEach(e => { const row = el('div', 'activity-entry'); const mark = el('span', 'activity-icon'); mark.append(icon(e.type === 'file.created' ? 'paper' : e.type === 'member.updated' ? 'users' : e.type === 'turn.updated' ? 'check' : e.type === 'agent.tool' ? 'tool' : 'notebook')); const info = el('div'); info.append(el('p', '', activityDescription(e)), el('small', '', when(e.created_at))); row.append(mark, info); $('activity-list').append(row); }); }
   async function loadActivity() { if (!state.project) return; const epoch = state.epoch; try { const d = await api(projectAPI('/activity?after=0')); if (epoch !== state.epoch) return; const merged = new Map(state.activity.map(e => [String(e.id), e])); (d.events || []).forEach(e => merged.set(String(e.id), e)); state.activity = [...merged.values()].sort((a, b) => Number(a.id) - Number(b.id)).slice(-300); renderActivity(); } catch (err) { if (epoch === state.epoch) $('activity-list').replaceChildren(el('p', 'empty-small', err.message), button('重试', 'quiet-btn', loadActivity, 'refresh')); } }
   async function heartbeat(epoch) { if (epoch !== state.epoch || !state.project || document.hidden) return; try { await api(projectAPI('/presence'), { method: 'POST', body: {} }); } catch (_) { /* The event connection owns the visible reconnect state. */ } }
+  function acceptEvent(event) {
+    const id = Number(event.id) || 0;
+    if (id && id <= state.cursor) return;
+    if (id) state.cursor = id;
+    applyEvent(event);
+  }
+  async function pollEvents(epoch) {
+    if (epoch !== state.epoch || !state.project || !state.user) return;
+    let delay = 1200;
+    try {
+      if (!document.hidden && Date.now() - (state.lastStreamEvent || 0) > 2000) {
+        const result = await api(projectAPI(`/event-batch?after=${state.cursor}`), { signal: AbortSignal.timeout(8000) });
+        if (epoch !== state.epoch) return;
+        (result.events || []).forEach(acceptEvent);
+        setConnection('connected', '同步正常');
+        if (result.events?.length === 200) delay = 50;
+      }
+      if (!document.hidden && Date.now() - (state.lastMetaPoll || 0) > 10000) {
+        state.lastMetaPoll = Date.now(); refreshProjectMetaSoon();
+      }
+    } catch (_) {
+      if (epoch === state.epoch && Date.now() - (state.lastStreamEvent || 0) > 10000) setConnection('reconnecting', '正在重新连接');
+    } finally {
+      if (epoch === state.epoch && state.user && state.project) state.pollTimer = setTimeout(() => pollEvents(epoch), delay);
+    }
+  }
   function connectEvents(epoch) {
     if (epoch !== state.epoch || !state.project || !state.user) return; if (state.source) state.source.close(); const source = new EventSource(`/api${projectAPI(`/events?after=${state.cursor}`)}`, { withCredentials: true }); state.source = source;
-    source.onopen = () => { if (epoch !== state.epoch) return; state.reconnectDelay = 1200; setConnection('connected', '实时同步'); };
-    const handle = evt => { if (epoch !== state.epoch) return; let event; try { event = JSON.parse(evt.data); } catch (_) { return; } const id = Number(event.id || evt.lastEventId) || 0; if (id && id <= state.cursor) return; if (id) state.cursor = id; applyEvent(event); };
+    source.onopen = () => { if (epoch !== state.epoch) return; state.reconnectDelay = 1200; };
+    const handle = evt => { if (epoch !== state.epoch) return; let event; try { event = JSON.parse(evt.data); } catch (_) { return; } state.lastStreamEvent = Date.now(); setConnection('connected', '实时同步'); acceptEvent({ ...event, id: event.id || evt.lastEventId }); };
     source.onmessage = handle; ['message.created', 'message.updated', 'turn.updated', 'agent.delta', 'agent.tool', 'project.updated', 'file.created', 'member.updated', 'presence'].forEach(type => source.addEventListener(type, handle));
     source.onerror = () => { if (epoch !== state.epoch || !state.user) return; source.close(); if (state.source === source) state.source = null; setConnection('reconnecting', '正在重新连接'); clearTimeout(state.reconnectTimer); state.reconnectTimer = setTimeout(() => connectEvents(epoch), state.reconnectDelay); state.reconnectDelay = Math.min(15000, state.reconnectDelay * 1.6); };
   }

@@ -25,6 +25,7 @@ JSON API under `/api`; all errors `{detail: string}`. Auth cookies are HttpOnly;
 - `POST /api/users {username,display_name?,password,role:'owner'|'member'}` -> User platform owner only.
 - `POST /api/projects/{id}/presence` -> `{ok:true}` auth, refresh user heartbeat; SSE presence lists currently active members (real browser heartbeats).
 - `GET /api/projects/{id}/activity?after=0` -> `{events:[Event]}` durable audit event list.
+- `GET /api/projects/{id}/event-batch?after=cursor` -> `{events:[Event]}` up to 200 ordered durable events, including deltas. The browser uses this when a public proxy buffers SSE; both transports deduplicate by event ID and enforce the same project membership.
 - `GET /health` non-sensitive liveness.
 
 Project `{id,name,description,provider,model,native_session_id,status:'idle'|'running'|'waiting'|'error',created_at,updated_at,role:'owner'|'editor'|'viewer',active_turn:Turn|null,queued_count,permission_mode:'full-access'}`. Workspace path should not be displayed in main user flow.
