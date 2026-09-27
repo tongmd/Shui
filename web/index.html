@@ -17,6 +17,21 @@
     <div class="login-story"><a class="brand" href="/" aria-label="Shui! 首页"><img src="/icon.png" alt="TongLab" width="46" height="46"><span>Shui<span class="brand-bang">!</span></span></a></div>
     <div class="login-form-wrap"><form id="login-form" class="login-form"><h2>登录工作空间</h2><label>账号<input id="login-username" name="username" autocomplete="username" required placeholder="用户名"></label><label>密码<input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="密码"></label><p id="login-error" class="form-error" role="alert" hidden></p><button class="btn primary login-submit" type="submit">登录</button></form></div>
   </section>
+  <section id="password-view" class="login-view password-view" aria-labelledby="password-title" hidden>
+    <div class="login-story"><a class="brand" href="/" aria-label="Shui! 首页"><img src="/icon.png" alt="TongLab" width="46" height="46"><span>Shui<span class="brand-bang">!</span></span></a></div>
+    <div class="login-form-wrap"><form id="password-form" class="login-form">
+      <div class="password-heading"><h2 id="password-title">设置你的密码</h2><p class="password-intro">首次登录需要修改初始密码，完成后即可进入工作空间。</p></div>
+      <p class="password-account">当前账号 <strong id="password-account-name"></strong></p>
+      <input id="password-username" name="username" class="visually-hidden" autocomplete="username" readonly tabindex="-1" aria-hidden="true">
+      <label>当前密码<input id="password-current" name="current_password" type="password" autocomplete="current-password" required placeholder="初始密码与用户名相同"></label>
+      <label>新密码<input id="password-new" name="new_password" type="password" autocomplete="new-password" minlength="8" maxlength="256" aria-describedby="password-help" required placeholder="至少 8 位"></label>
+      <p id="password-help" class="password-help">使用 8–256 位字符，不能与用户名或当前密码相同。</p>
+      <label>确认新密码<input id="password-confirm" name="confirm_password" type="password" autocomplete="new-password" minlength="8" maxlength="256" required placeholder="再次输入新密码"></label>
+      <p id="password-error" class="form-error" role="alert" hidden></p>
+      <button id="password-submit" class="btn primary login-submit" type="submit">保存并进入工作空间</button>
+      <button id="password-logout" class="quiet-btn" type="button">退出登录</button>
+    </form></div>
+  </section>
   <div id="app" class="app" hidden>
     <button id="drawer-scrim" class="drawer-scrim" aria-label="关闭侧栏" hidden></button>
     <aside id="sidebar" class="sidebar" aria-label="项目导航">
@@ -31,7 +46,7 @@
       <header class="topbar"><button id="open-sidebar" class="icon-btn mobile-only" aria-label="打开项目导航" data-icon="menu"></button><div class="breadcrumb">工作空间 <span>/</span> <span id="breadcrumb-project">概览</span></div><div id="connection" class="connection"><span class="status-dot"></span><span id="connection-text">正在连接</span></div><button id="open-inspector" class="icon-btn inspector-toggle" aria-label="打开项目资料" data-icon="panel"></button></header>
       <section id="welcome" class="welcome"><div class="empty-mark" data-icon="folder"></div><h1>暂无研究项目</h1><button id="welcome-create" class="btn primary" hidden><span data-icon="plus"></span>新建项目</button></section>
       <section id="project-view" class="project-view" hidden>
-        <div class="project-header"><div class="project-heading"><h1 id="project-title"></h1><p id="project-description" class="project-description"></p><div class="project-meta"><span id="provider-pill" class="provider-pill"></span><span id="project-status" class="project-state"></span><span id="project-model" class="model-label"></span></div></div><div class="project-header-actions"><div id="presence" class="presence" aria-label="在线成员"></div><button id="project-settings" class="icon-btn outlined" title="项目设置" aria-label="项目设置" data-icon="settings" hidden></button></div></div>
+        <div class="project-header"><div class="project-heading"><h1 id="project-title"></h1><p id="project-description" class="project-description"></p><div class="project-meta"><span id="provider-pill" class="provider-pill"></span><span id="project-status" class="project-state"></span><span id="project-model" class="model-label"></span></div><div id="project-links" class="project-links" aria-label="关联项目" hidden></div></div><div class="project-header-actions"><div id="presence" class="presence" aria-label="在线成员"></div><button id="project-settings" class="icon-btn outlined" title="项目设置" aria-label="项目设置" data-icon="settings" hidden></button></div></div>
         <div id="queue-banner" class="queue-banner" hidden><span class="pulse-dot"></span><span id="queue-label"></span><button id="cancel-active" class="quiet-btn" hidden>停止当前任务</button></div>
         <div id="project-error" class="inline-notice error" role="alert" hidden></div>
         <div id="conversation" class="conversation" tabindex="0" aria-label="共享对话"><div class="history-top"><button id="load-history" class="quiet-btn" hidden><span data-icon="history"></span>加载更早的消息</button></div><div id="messages" class="messages"></div><div id="conversation-empty" class="conversation-empty"><div class="empty-mark" data-icon="notebook"></div><h2>暂无消息</h2></div></div>

@@ -40,6 +40,24 @@ The owner has access to every project and can create accounts, assign project
 members, configure models, and cancel any project turn. Members can be editors
 or viewers. An editor can submit tasks and uploads; a viewer can read and download.
 
+New team accounts start with their username as the initial password. Their
+first sign-in opens a mandatory password-change page. Project data and actions
+remain unavailable until they set a new password. Password changes rotate the
+current login and revoke every earlier login for that account.
+
+The **Team accounts** screen manages each person's status, role, and project
+assignments in one place. An owner can reset another member's password to their
+username, requiring another password change. Disabling an account signs it out;
+removing task permissions cancels its pending work and requests cancellation
+of its current task. The primary owner cannot be disabled or demoted there.
+
+Each project stores one GitHub repository link and one Overleaf project link,
+editable in project settings and available directly in the project header.
+Those resources are also included in the shared agent's task context. Existing
+projects can add their links when ready. Team account roles manage access
+inside Shui; external GitHub and Overleaf membership follows those services'
+own permissions.
+
 ## Shared sessions and execution
 
 - Create one project per paper, then add the collaborators to that project.

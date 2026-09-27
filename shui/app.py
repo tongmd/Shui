@@ -13,13 +13,14 @@ import time
 import unicodedata
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from .agents import provider_status
-from .store import Store, now, uid, verify_password
+from .store import Store, now, password_hash, uid, verify_password
 from .worker import Coordinator
 
 COOKIE = "shui_session"
@@ -38,6 +39,47 @@ FORBIDDEN_NAMES = {
     "id_ed25519",
     ".shui",
 }
+
+
+def project_link(value, kind):
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str) or len(value) > 500:
+        raise HTTPException(400, f"Invalid {kind} link")
+    try:
+        parts = urlsplit(value.strip())
+        if (
+            parts.scheme != "https"
+            or parts.username
+            or parts.password
+            or parts.port
+            or parts.query
+            or parts.fragment
+        ):
+            raise ValueError
+        path = parts.path.rstrip("/")
+        if kind == "github":
+            if parts.hostname != "github.com" or not re.fullmatch(
+                r"/[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]+", path
+            ):
+                raise ValueError
+            path = path.removesuffix(".git")
+            if path.split("/")[-1] in {".", "..", ""}:
+                raise ValueError
+            return "https://github.com" + path
+        if parts.hostname not in {
+            "overleaf.com",
+            "www.overleaf.com",
+        } or not re.fullmatch(r"/project/[0-9a-fA-F]{24}", path):
+            raise ValueError
+        return "https://www.overleaf.com" + path.lower()
+    except ValueError:
+        example = (
+            "https://github.com/owner/repo"
+            if kind == "github"
+            else "https://www.overleaf.com/project/PROJECT_ID"
+        )
+        raise HTTPException(400, f"Use a {kind} project link such as {example}")
 
 
 def safe_artifact(root: Path, relative: str, directory=False):
@@ -146,14 +188,14 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
     async def invalid(req, exc):
         return JSONResponse({"detail": "The request is incomplete or malformed."}, 422)
 
-    def auth(request, write=False):
+    def auth(request, write=False, allow_password_change=False):
         token = request.cookies.get(COOKIE, "")
         with store.connect() as c:
             row = c.execute(
                 "SELECT u.*,s.csrf FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires>?",
                 (hashlib.sha256(token.encode()).hexdigest(), time.time()),
             ).fetchone()
-        if not row:
+        if not row or not row["is_active"]:
             raise HTTPException(401, "Please sign in")
         if write:
             if (
@@ -165,6 +207,14 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                 request.headers.get("x-csrf-token", ""), row["csrf"]
             ):
                 raise HTTPException(403, "Refresh the page and try again")
+        if row["must_change_password"] and not allow_password_change:
+            raise HTTPException(
+                403,
+                {
+                    "code": "password_change_required",
+                    "message": "Please change your initial password before continuing",
+                },
+            )
         return dict(row)
 
     def access(request, pid, write=False, owner=False):
@@ -204,7 +254,9 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             "authenticated": bool(user),
             "user": store.user(user) if user else None,
             "csrf": user["csrf"] if user else None,
-            "providers": provider_status() if user else [],
+            "providers": provider_status()
+            if user and not user["must_change_password"]
+            else [],
             "version": "0.1.0",
         }
 
@@ -215,7 +267,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
     @app.get("/api/session")
     async def session(request: Request):
         try:
-            user = auth(request)
+            user = auth(request, allow_password_change=True)
         except HTTPException:
             user = None
         return session_payload(user)
@@ -248,10 +300,21 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             ).fetchone()
         encoded = row["password_hash"] if row else "00" * 16 + ":" + "00" * 64
         valid = await asyncio.to_thread(verify_password, password, encoded)
-        if not row or not valid:
+        if not row or not valid or not row["is_active"]:
             raise HTTPException(401, "Incorrect username or password")
         token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
         with store.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            current = c.execute(
+                "SELECT * FROM users WHERE id=?", (row["id"],)
+            ).fetchone()
+            if (
+                not current
+                or not current["is_active"]
+                or current["password_hash"] != encoded
+            ):
+                raise HTTPException(401, "Incorrect username or password")
+            row = current
             c.execute("DELETE FROM login_attempts WHERE ip=?", (ip,))
             c.execute("DELETE FROM sessions WHERE expires<?", (time.time(),))
             c.execute(
@@ -263,6 +326,9 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                     time.time() + 86400 * 7,
                 ),
             )
+        return signed_in_response(row, token, csrf)
+
+    def signed_in_response(row, token, csrf):
         user = dict(row)
         user["csrf"] = csrf
         response = JSONResponse(session_payload(user))
@@ -279,7 +345,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
 
     @app.post("/api/logout")
     async def logout(request: Request):
-        auth(request, True)
+        auth(request, True, allow_password_change=True)
         with store.connect() as c:
             c.execute(
                 "DELETE FROM sessions WHERE token_hash=?",
@@ -288,6 +354,68 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
         r = JSONResponse({"ok": True})
         r.delete_cookie(COOKIE, path="/")
         return r
+
+    @app.post("/api/password")
+    async def change_password(request: Request):
+        user = auth(request, True, allow_password_change=True)
+        data = await body(request)
+        old, new, confirm = (
+            data.get(key)
+            for key in ("current_password", "new_password", "confirm_password")
+        )
+        if not all(isinstance(v, str) for v in (old, new, confirm)) or len(old) > 256:
+            raise HTTPException(400, "Complete all password fields")
+        if not 8 <= len(new) <= 256 or not new.strip():
+            raise HTTPException(400, "New password must be 8–256 characters")
+        if new != confirm:
+            raise HTTPException(400, "New passwords do not match")
+        if new.casefold() == user["username"].casefold() or new == old:
+            raise HTTPException(
+                400,
+                "Choose a new password different from your username and current password",
+            )
+        if not await asyncio.to_thread(verify_password, old, user["password_hash"]):
+            raise HTTPException(400, "Current password is incorrect")
+        encoded = await asyncio.to_thread(password_hash, new)
+        token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
+        with store.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            current = c.execute(
+                "SELECT * FROM users WHERE id=?", (user["id"],)
+            ).fetchone()
+            session_exists = c.execute(
+                "SELECT 1 FROM sessions WHERE token_hash=? AND expires>?",
+                (
+                    hashlib.sha256(
+                        request.cookies.get(COOKIE, "").encode()
+                    ).hexdigest(),
+                    time.time(),
+                ),
+            ).fetchone()
+            if not current or not current["is_active"] or not session_exists:
+                raise HTTPException(401, "Please sign in")
+            if current["password_hash"] != user["password_hash"]:
+                raise HTTPException(
+                    409, "Password changed during this request. Sign in again."
+                )
+            c.execute(
+                "UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?",
+                (encoded, user["id"]),
+            )
+            c.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
+            c.execute(
+                "INSERT INTO sessions VALUES(?,?,?,?)",
+                (
+                    hashlib.sha256(token.encode()).hexdigest(),
+                    user["id"],
+                    csrf,
+                    time.time() + 86400 * 7,
+                ),
+            )
+            updated = c.execute(
+                "SELECT * FROM users WHERE id=?", (user["id"],)
+            ).fetchone()
+        return signed_in_response(updated, token, csrf)
 
     @app.get("/api/users")
     async def users(request: Request):
@@ -308,17 +436,249 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
         if u["role"] != "owner":
             raise HTTPException(403, "Platform owner permission required")
         data = await body(request)
+        platform_owner(request, True)
         try:
             return store.create_user(
                 textfield(data, "username", 40),
                 textfield(data, "display_name", 80) or textfield(data, "username", 40),
-                data.get("password", ""),
+                None,
                 data.get("role", "member"),
+                must_change_password=True,
             )
         except (ValueError, TypeError):
-            raise HTTPException(
-                400, "Use a valid username and a password of at least eight characters"
+            raise HTTPException(400, "Use a valid username, display name and role")
+
+    def platform_owner(request, write=False):
+        user = auth(request, write)
+        if user["role"] != "owner":
+            raise HTTPException(403, "Platform owner permission required")
+        return user
+
+    def managed_user(c, user_id):
+        row = c.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Account not found")
+        return dict(row)
+
+    def stop_disallowed_turns(c, user):
+        for turn in c.execute(
+            "SELECT * FROM turns WHERE author_id=? AND status IN ('queued','running')",
+            (user["id"],),
+        ).fetchall():
+            permitted = (
+                user["is_active"]
+                and not user["must_change_password"]
+                and store.project_role(c, turn["project_id"], user)
+                in ("owner", "editor")
             )
+            if permitted:
+                continue
+            if turn["status"] == "running":
+                if turn["id"] in coordinator.cancels:
+                    coordinator.cancels[turn["id"]].set()
+            else:
+                c.execute(
+                    "UPDATE turns SET status='cancelled',finished_at=? WHERE id=?",
+                    (now(), turn["id"]),
+                )
+                c.execute(
+                    "UPDATE messages SET status='cancelled' WHERE turn_id=?",
+                    (turn["id"],),
+                )
+                store.event(
+                    c,
+                    turn["project_id"],
+                    "turn.updated",
+                    {
+                        "turn": dict(
+                            c.execute(
+                                "SELECT * FROM turns WHERE id=?", (turn["id"],)
+                            ).fetchone()
+                        )
+                    },
+                )
+                if not c.execute(
+                    "SELECT 1 FROM turns WHERE project_id=? AND status IN ('queued','running')",
+                    (turn["project_id"],),
+                ).fetchone():
+                    c.execute(
+                        "UPDATE projects SET status='idle' WHERE id=? AND status!='error'",
+                        (turn["project_id"],),
+                    )
+
+    @app.patch("/api/users/{user_id}")
+    async def user_update(user_id: str, request: Request):
+        actor = platform_owner(request, True)
+        data = await body(request)
+        actor = platform_owner(request, True)
+        if set(data) - {"display_name", "role", "is_active"}:
+            raise HTTPException(400, "Unsupported account setting")
+        with store.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            target = managed_user(c, user_id)
+            if "display_name" in data:
+                target["display_name"] = textfield(data, "display_name", 80)
+                if not target["display_name"]:
+                    raise HTTPException(400, "Display name is required")
+            if "role" in data:
+                if data["role"] not in ("member", "owner"):
+                    raise HTTPException(400, "Choose member or owner")
+                target["role"] = data["role"]
+            if "is_active" in data:
+                if not isinstance(data["is_active"], bool):
+                    raise HTTPException(400, "Invalid account status")
+                target["is_active"] = data["is_active"]
+            protected = c.execute(
+                "SELECT id FROM users ORDER BY created_at,id LIMIT 1"
+            ).fetchone()["id"]
+            if user_id in {actor["id"], protected} and (
+                not target["is_active"] or target["role"] != "owner"
+            ):
+                raise HTTPException(
+                    409,
+                    "The primary owner and your own owner access cannot be disabled or demoted",
+                )
+            c.execute(
+                "UPDATE users SET display_name=?,role=?,is_active=? WHERE id=?",
+                (
+                    target["display_name"],
+                    target["role"],
+                    int(target["is_active"]),
+                    user_id,
+                ),
+            )
+            if not target["is_active"]:
+                c.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+                c.execute("DELETE FROM presence WHERE user_id=?", (user_id,))
+            stop_disallowed_turns(c, target)
+            for p in c.execute(
+                "SELECT project_id FROM members WHERE user_id=?", (user_id,)
+            ).fetchall():
+                store.event(
+                    c,
+                    p["project_id"],
+                    "member.updated",
+                    {"user_id": user_id, "actor": actor["username"]},
+                )
+            return store.user(target)
+
+    @app.post("/api/users/{user_id}/reset-password")
+    async def user_reset_password(user_id: str, request: Request):
+        actor = platform_owner(request, True)
+        if user_id == actor["id"]:
+            raise HTTPException(
+                409, "Use your own password-change form for this account"
+            )
+        with store.connect() as c:
+            target = managed_user(c, user_id)
+        encoded = await asyncio.to_thread(password_hash, target["username"])
+        with store.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            actor = platform_owner(request, True)
+            protected = c.execute(
+                "SELECT id FROM users ORDER BY created_at,id LIMIT 1"
+            ).fetchone()["id"]
+            if user_id == protected:
+                raise HTTPException(
+                    409, "The primary owner password must be changed by that owner"
+                )
+            c.execute(
+                "UPDATE users SET password_hash=?,must_change_password=1 WHERE id=?",
+                (encoded, user_id),
+            )
+            c.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+            c.execute("DELETE FROM presence WHERE user_id=?", (user_id,))
+            target = managed_user(c, user_id)
+            stop_disallowed_turns(c, target)
+            return store.user(target)
+
+    def membership_payload(c, user):
+        result = []
+        for project in c.execute(
+            "SELECT id,name FROM projects ORDER BY name,id"
+        ).fetchall():
+            row = c.execute(
+                "SELECT role FROM members WHERE project_id=? AND user_id=?",
+                (project["id"], user["id"]),
+            ).fetchone()
+            result.append(
+                {
+                    "project_id": project["id"],
+                    "name": project["name"],
+                    "role": row["role"] if row else None,
+                    "effective_role": store.project_role(c, project["id"], user)
+                    if user["is_active"]
+                    else None,
+                }
+            )
+        return {"memberships": result}
+
+    @app.get("/api/users/{user_id}/memberships")
+    async def user_memberships(user_id: str, request: Request):
+        platform_owner(request)
+        with store.connect() as c:
+            return membership_payload(c, managed_user(c, user_id))
+
+    @app.put("/api/users/{user_id}/memberships")
+    async def user_memberships_update(user_id: str, request: Request):
+        actor = platform_owner(request, True)
+        data = await body(request)
+        assignments = data.get("memberships")
+        actor = platform_owner(request, True)
+        if not isinstance(assignments, list) or len(assignments) > 1000:
+            raise HTTPException(400, "Invalid project memberships")
+        wanted = {}
+        for item in assignments:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("project_id"), str)
+                or item.get("role") not in ("editor", "viewer")
+                or item["project_id"] in wanted
+            ):
+                raise HTTPException(400, "Use one editor or viewer role per project")
+            wanted[item["project_id"]] = item["role"]
+        with store.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            target = managed_user(c, user_id)
+            before = {
+                r["project_id"]: r["role"]
+                for r in c.execute("SELECT * FROM members WHERE user_id=?", (user_id,))
+            }
+            for pid in wanted:
+                if not c.execute(
+                    "SELECT 1 FROM projects WHERE id=?", (pid,)
+                ).fetchone():
+                    raise HTTPException(400, "Project not found")
+                if before.get(pid) == "owner":
+                    raise HTTPException(
+                        409, "Project ownership cannot be replaced here"
+                    )
+            c.execute(
+                "DELETE FROM members WHERE user_id=? AND role!='owner'", (user_id,)
+            )
+            for pid, role in wanted.items():
+                c.execute("INSERT INTO members VALUES(?,?,?)", (pid, user_id, role))
+            for pid in set(before) | set(wanted):
+                if before.get(pid) == "owner":
+                    continue
+                if before.get(pid) != wanted.get(pid):
+                    c.execute(
+                        "DELETE FROM presence WHERE project_id=? AND user_id=?",
+                        (pid, user_id),
+                    )
+                    store.event(
+                        c,
+                        pid,
+                        "member.updated",
+                        {
+                            "user_id": user_id,
+                            "role": wanted.get(pid),
+                            "removed": pid not in wanted,
+                            "actor": actor["username"],
+                        },
+                    )
+            stop_disallowed_turns(c, target)
+            return membership_payload(c, target)
 
     @app.get("/api/projects")
     async def projects(request: Request):
@@ -341,6 +701,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
         if u["role"] != "owner":
             raise HTTPException(403, "Platform owner permission required")
         data = await body(request)
+        u = platform_owner(request, True)
         name = textfield(data, "name", 120)
         description = textfield(data, "description", 3000)
         provider = data.get("provider", "codex")
@@ -350,7 +711,16 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             raise HTTPException(400, "Choose a project name and provider")
         if sid and not re.fullmatch(r"[A-Za-z0-9_-]{8,160}", sid):
             raise HTTPException(400, "Invalid native session ID")
-        return store.create_project(u, name, description, provider, model, sid)
+        return store.create_project(
+            u,
+            name,
+            description,
+            provider,
+            model,
+            sid,
+            github_url=project_link(data.get("github_url", ""), "github"),
+            overleaf_url=project_link(data.get("overleaf_url", ""), "overleaf"),
+        )
 
     @app.get("/api/projects/{pid}")
     async def project_get(pid: str, request: Request):
@@ -384,7 +754,15 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
     async def project_patch(pid: str, request: Request):
         u, _ = access(request, pid, True, True)
         data = await body(request)
-        if set(data) - {"name", "description", "model", "native_session_id"}:
+        u, _ = access(request, pid, True, True)
+        if set(data) - {
+            "name",
+            "description",
+            "model",
+            "native_session_id",
+            "github_url",
+            "overleaf_url",
+        }:
             raise HTTPException(400, "Unsupported project setting")
         with store.connect() as c:
             c.execute("BEGIN IMMEDIATE")
@@ -418,13 +796,18 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                 p[key] = value or (
                     None if key in ("model", "native_session_id") else ""
                 )
+            for key, kind in [("github_url", "github"), ("overleaf_url", "overleaf")]:
+                if key in data:
+                    p[key] = project_link(data[key], kind)
             c.execute(
-                "UPDATE projects SET name=?,description=?,model=?,native_session_id=?,updated_at=? WHERE id=?",
+                "UPDATE projects SET name=?,description=?,model=?,native_session_id=?,github_url=?,overleaf_url=?,updated_at=? WHERE id=?",
                 (
                     p["name"],
                     p["description"],
                     p["model"],
                     p["native_session_id"],
+                    p["github_url"],
+                    p["overleaf_url"],
                     now(),
                     pid,
                 ),
@@ -558,6 +941,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
     async def message_create(pid: str, request: Request):
         u, _ = access(request, pid, True)
         data = await body(request)
+        u, _ = access(request, pid, True)
         ids = data.get("attachment_ids", [])
         if not isinstance(ids, list):
             raise HTTPException(400, "Attachments must be a list")
@@ -573,6 +957,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
     async def retry(pid: str, tid: str, request: Request):
         u, role = access(request, pid, True)
         data = await body(request)
+        u, role = access(request, pid, True)
         with store.connect() as c:
             t = c.execute(
                 "SELECT * FROM turns WHERE id=? AND project_id=?", (tid, pid)
@@ -691,6 +1076,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                     stream.write(chunk)
             with store.connect() as c:
                 c.execute("BEGIN IMMEDIATE")
+                access(request, pid, True)
                 quota = int(
                     os.environ.get("SHUI_PROJECT_UPLOAD_QUOTA", str(5 * 1024**3))
                 )
@@ -801,6 +1187,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
     async def member_add(pid: str, request: Request):
         u, _ = access(request, pid, True, True)
         data = await body(request)
+        u, _ = access(request, pid, True, True)
         role = data.get("role", "editor")
         if role not in ("editor", "viewer"):
             raise HTTPException(400, "Choose editor or viewer")
@@ -821,6 +1208,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                 "INSERT INTO members VALUES(?,?,?) ON CONFLICT(project_id,user_id) DO UPDATE SET role=excluded.role",
                 (pid, member["id"], role),
             )
+            stop_disallowed_turns(c, member)
             store.event(
                 c,
                 pid,
@@ -845,6 +1233,9 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             c.execute(
                 "DELETE FROM presence WHERE project_id=? AND user_id=?", (pid, user_id)
             )
+            target = c.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            if target:
+                stop_disallowed_turns(c, target)
             store.event(
                 c,
                 pid,

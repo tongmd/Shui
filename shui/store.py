@@ -85,6 +85,32 @@ class Store:
             CREATE TABLE IF NOT EXISTS bridge_state(project_id TEXT PRIMARY KEY REFERENCES projects(id),session_id TEXT NOT NULL,last_seen REAL NOT NULL,phase TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS migrations(source_key TEXT PRIMARY KEY,project_id TEXT NOT NULL,created_at TEXT NOT NULL);
             """)
+            c.execute("BEGIN IMMEDIATE")
+            user_columns = {row[1] for row in c.execute("PRAGMA table_info(users)")}
+            if "must_change_password" not in user_columns:
+                c.execute(
+                    "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0"
+                )
+                for user in c.execute(
+                    "SELECT id,username,password_hash FROM users"
+                ).fetchall():
+                    if verify_password(user["username"], user["password_hash"]):
+                        c.execute(
+                            "UPDATE users SET must_change_password=1 WHERE id=?",
+                            (user["id"],),
+                        )
+            if "is_active" not in user_columns:
+                c.execute(
+                    "ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1"
+                )
+            project_columns = {
+                row[1] for row in c.execute("PRAGMA table_info(projects)")
+            }
+            for column in ("github_url", "overleaf_url"):
+                if column not in project_columns:
+                    c.execute(
+                        f"ALTER TABLE projects ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                    )
         os.chmod(self.path, 0o600)
 
     def workspace(self, project_id):
@@ -105,16 +131,29 @@ class Store:
 
     @staticmethod
     def user(row):
-        return {k: row[k] for k in ("id", "username", "display_name", "role")}
+        return {
+            **{k: row[k] for k in ("id", "username", "display_name", "role")},
+            "must_change_password": bool(row["must_change_password"]),
+            "is_active": bool(row["is_active"]),
+        }
 
-    def create_user(self, username, display_name, password, role="member"):
+    def create_user(
+        self,
+        username,
+        display_name,
+        password,
+        role="member",
+        must_change_password=False,
+    ):
         import re
 
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{1,39}", username):
             raise ValueError(
                 "Username must be 2–40 letters, digits, dots, underscores or hyphens"
             )
-        if not 8 <= len(password) <= 256:
+        if must_change_password:
+            password = username
+        elif not isinstance(password, str) or not 8 <= len(password) <= 256:
             raise ValueError("Password must be 8–256 characters")
         if (
             role not in ("owner", "member")
@@ -125,8 +164,16 @@ class Store:
         with self.connect() as c:
             id_ = uid()
             c.execute(
-                "INSERT INTO users VALUES(?,?,?,?,?,?)",
-                (id_, username, display_name, password_hash(password), role, now()),
+                "INSERT INTO users(id,username,display_name,password_hash,role,created_at,must_change_password) VALUES(?,?,?,?,?,?,?)",
+                (
+                    id_,
+                    username,
+                    display_name,
+                    password_hash(password),
+                    role,
+                    now(),
+                    int(must_change_password),
+                ),
             )
             return self.user(
                 c.execute("SELECT * FROM users WHERE id=?", (id_,)).fetchone()
@@ -222,6 +269,8 @@ class Store:
         provider="codex",
         model=None,
         native_session_id=None,
+        github_url="",
+        overleaf_url="",
     ):
         id_, at = uid(), now()
         workspace = self.workspace(id_)
@@ -229,7 +278,7 @@ class Store:
         (workspace / "uploads").mkdir(mode=0o700)
         with self.connect() as c:
             c.execute(
-                "INSERT INTO projects VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO projects(id,name,description,provider,model,native_session_id,status,created_by,created_at,updated_at,github_url,overleaf_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     id_,
                     name,
@@ -241,6 +290,8 @@ class Store:
                     user["id"],
                     at,
                     at,
+                    github_url,
+                    overleaf_url,
                 ),
             )
             c.execute("INSERT INTO members VALUES(?,?,?)", (id_, user["id"], "owner"))

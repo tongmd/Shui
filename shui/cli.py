@@ -116,7 +116,7 @@ def main(argv=None):
                 if not user:
                     parser.error("Account not found.")
                 c.execute(
-                    "UPDATE users SET password_hash=? WHERE id=?",
+                    "UPDATE users SET password_hash=?,must_change_password=1 WHERE id=?",
                     (password_hash(password), user["id"]),
                 )
                 c.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))

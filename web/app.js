@@ -48,20 +48,33 @@
     let data; try { data = await response.json(); } catch (_) { data = null; }
     if (!response.ok) {
       if (response.status === 401 && path !== '/login' && path !== '/session') { showLogin(); throw new Error('登录已过期，请重新登录。'); }
-      const detail = data?.detail; throw new Error(typeof detail === 'string' ? detail : `请求未完成（${response.status}），请重试。`);
+      if (response.status === 403 && (data?.code === 'password_change_required' || data?.detail?.code === 'password_change_required')) { if (state.user) state.user.must_change_password = true; showPasswordChange(); throw new Error('请先修改初始密码，再进入工作空间。'); }
+      const detail = data?.detail; const message = typeof detail === 'string' ? detail : detail?.message;
+      const translated = { 'Current password is incorrect': '当前密码不正确，请重新输入。', 'New passwords do not match': '两次输入的新密码不一致。', 'New password must be 8–256 characters': '新密码需要 8–256 位字符。', 'Choose a new password different from your username and current password': '新密码不能与用户名或当前密码相同。', 'Display name is required': '请输入显示名称。' };
+      throw new Error(translated[message] || message || `请求未完成（${response.status}），请重试。`);
     }
     return data;
   }
   function setConnection(mode, text) { state.liveConnected = mode === 'connected'; $('connection').className = `connection ${mode}`; $('connection-text').textContent = text; }
   function stopEvents() { if (state.source) state.source.close(); state.source = null; clearTimeout(state.pollTimer); state.pollTimer = null; clearTimeout(state.reconnectTimer); state.reconnectTimer = null; clearTimeout(state.metaTimer); state.metaTimer = null; clearInterval(state.heartbeat); state.heartbeat = null; }
-  function showLogin() { stopEvents(); state.user = null; state.csrf = null; state.project = null; state.epoch++; $('boot').hidden = true; $('app').hidden = true; $('login-view').hidden = false; if ($('form-dialog').open) $('form-dialog').close(); if ($('preview-dialog').open) $('preview-dialog').close(); closeDrawers(); $('login-password').value = ''; }
+  function closeWorkspace() { stopEvents(); state.project = null; state.projects = []; state.messages.clear(); state.turns.clear(); state.tools.clear(); state.epoch++; if ($('form-dialog').open) $('form-dialog').close(); if ($('preview-dialog').open) $('preview-dialog').close(); closeDrawers(); }
+  function showLogin() { closeWorkspace(); state.user = null; state.csrf = null; state.providers = []; $('boot').hidden = true; $('app').hidden = true; $('password-view').hidden = true; $('login-view').hidden = false; $('login-password').value = ''; $('password-form').reset(); }
+  function showPasswordChange() {
+    const entering = $('password-view').hidden; closeWorkspace(); state.providers = [];
+    $('boot').hidden = true; $('app').hidden = true; $('login-view').hidden = true; $('password-view').hidden = false;
+    if (entering) { $('password-form').reset(); $('password-error').hidden = true; }
+    $('password-account-name').textContent = state.user?.username || ''; $('password-username').value = state.user?.username || '';
+    if (entering) $('password-current').focus();
+  }
   async function startSession(session) {
     state.user = session.user; state.csrf = session.csrf; state.providers = session.providers || [];
-    $('boot').hidden = true; $('login-view').hidden = true; $('app').hidden = false; $('user-name').textContent = name(state.user); $('user-role').textContent = roles[state.user.role] || '团队成员';
+    if (state.user.must_change_password) { showPasswordChange(); return; }
+    $('password-view').hidden = true; $('password-form').reset(); $('boot').hidden = true; $('login-view').hidden = true; $('app').hidden = false; $('user-name').textContent = name(state.user); $('user-role').textContent = roles[state.user.role] || '团队成员';
     const a = avatar(state.user); a.id = 'user-avatar'; $('user-avatar').replaceWith(a); $('create-project').hidden = state.user.role !== 'owner'; $('welcome-create').hidden = state.user.role !== 'owner'; $('manage-users').hidden = state.user.role !== 'owner';
     setConnection('connected', '已登录'); await loadProjects();
   }
   async function loadProjects(preferId) {
+    if (!state.user || state.user.must_change_password) return;
     $('project-list').replaceChildren(el('div', 'skeleton'), el('div', 'skeleton'));
     try { const data = await api('/projects'); state.projects = data.projects || []; renderProjects(); const id = preferId || stored('shui-project'); const next = state.projects.find(p => String(p.id) === String(id)) || state.projects[0]; if (next) await selectProject(next.id); else showWelcome(); }
     catch (err) { $('project-list').replaceChildren(el('p', 'empty-small', err.message), button('重新加载', 'quiet-btn', () => loadProjects(), 'refresh')); setConnection('', '加载失败'); }
@@ -73,6 +86,7 @@
   }
   function showWelcome() { state.project = null; stopEvents(); $('welcome').hidden = false; $('project-view').hidden = true; $('breadcrumb-project').textContent = '概览'; $('inspector-empty').hidden = false; ['files', 'activity', 'members'].forEach(t => $(`panel-${t}`).hidden = true); $('project-error').hidden = true; $('conversation-empty').hidden = true; $('messages').replaceChildren(); renderProjects(); setConnection('connected', '已登录'); }
   async function selectProject(id) {
+    if (!state.user || state.user.must_change_password) return;
     if (String(state.project?.id) === String(id) && !state.projectLoading) { closeDrawers(); return; }
     const epoch = ++state.epoch; stopEvents(); closeDrawers(); state.projectLoading = true; state.messages.clear(); state.turns.clear(); state.tools.clear(); state.presence = []; state.activity = []; state.attachments = []; state.uploading = 0; state.pendingSend = null; state.sending = false; state.workspacePath = ''; state.cursor = 0; state.historyMore = true;
     state.project = state.projects.find(p => String(p.id) === String(id)) || { id, name: '正在加载…' }; $('message-input').value = ''; $('message-input').style.height = ''; renderUploads(); renderProjects(); renderHeader();
@@ -107,6 +121,9 @@
   function renderHeader() {
     const p = state.project; if (!p) return; $('project-title').textContent = p.name; $('breadcrumb-project').textContent = p.name; $('project-description').textContent = p.description || ''; $('project-description').hidden = !p.description;
     $('provider-pill').replaceChildren(icon('spark'), document.createTextNode(providerNames[p.provider] || p.provider || '')); $('project-status').textContent = labels[p.status] || '正在加载'; $('project-model').textContent = p.model || ''; $('project-settings').hidden = !isOwner(); $('add-member').hidden = !isOwner();
+    const links = $('project-links'); links.replaceChildren();
+    [['github_url', 'GitHub'], ['overleaf_url', 'Overleaf']].forEach(([key, label]) => { if (!p[key]) return; let url; try { url = new URL(p[key]); } catch (_) { return; } if (url.protocol !== 'https:' || url.username || url.password) return; const a = el('a', 'project-link', `${label} ↗`); a.href = url.href; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.setAttribute('aria-label', `打开 ${label} 项目（新窗口）`); links.append(a); });
+    links.hidden = !links.childElementCount;
     const turn = p.active_turn; const n = Number(p.queued_count) || 0; const running = turn && !terminalStatuses.has(turn.status);
     $('queue-banner').hidden = !running && !n; $('queue-label').textContent = running ? `正在处理共同的任务${n ? ` · 后面还有 ${n} 条消息` : ''}` : `${n} 条消息等待处理`;
     $('cancel-active').hidden = !running || !canCancel(turn); renderPresence(); updateComposer();
@@ -254,16 +271,154 @@
     else if (type === 'agent.tool') { const id = String(p.turn_id); const list = state.tools.get(id) || []; const current = [...list].reverse().find(x => x.name === p.name && !terminalStatuses.has(x.status)); if (current && p.status !== 'running') Object.assign(current, p); else list.push(p); state.tools.set(id, list.slice(-12)); const m = [...state.messages.values()].find(x => String(x.turn_id) === id && x.role === 'assistant'); if (m) preserveScroll(() => renderMessage(m)); }
   }
   function field(body, label, id, options = {}) { const wrap = el('label', '', label); const input = el(options.tag || 'input'); input.id = id; input.name = id; if (options.tag === 'select') (options.options || []).forEach(([value, text]) => { const o = el('option', '', text); o.value = value; input.append(o); }); else if (options.tag !== 'textarea') input.type = options.type || 'text'; if (options.placeholder) input.placeholder = options.placeholder; if (options.required) input.required = true; if (options.maxLength) input.maxLength = options.maxLength; if (options.autocomplete) input.autocomplete = options.autocomplete; if (options.minLength) input.minLength = options.minLength; if (options.value !== undefined) input.value = options.value || ''; if (options.disabled) input.disabled = true; wrap.append(input); body.append(wrap); return input; }
-  function openDialog(title, eyebrow, build, action, submit = '保存') { $('dialog-title').textContent = title; $('dialog-eyebrow').textContent = eyebrow; $('dialog-body').replaceChildren(); $('dialog-error').hidden = true; $('dialog-submit').textContent = submit; $('dialog-submit').disabled = false; $('dialog-cancel').textContent = '取消'; state.dialogAction = action; build($('dialog-body')); if (!$('form-dialog').open) $('form-dialog').showModal(); }
+  function openDialog(title, eyebrow, build, action, submit = '保存') { $('dialog-title').textContent = title; $('dialog-eyebrow').textContent = eyebrow; $('dialog-body').replaceChildren(); $('dialog-error').hidden = true; $('dialog-submit').textContent = submit; $('dialog-submit').disabled = false; $('dialog-submit').hidden = !action; $('dialog-cancel').textContent = action ? '取消' : '关闭'; state.dialogAction = action; build($('dialog-body')); if (!$('form-dialog').open) $('form-dialog').showModal(); }
   function providerChoices(body) { const wrap = el('div'); wrap.append(el('div', 'form-help', '项目助手')); const options = el('div', 'provider-options'); const available = state.providers.filter(p => p.installed); const preferred = available[0]?.id; if (!preferred) options.append(el('p', 'empty-small', '目前没有可用的项目助手。请管理员先在主机上完成配置。')); available.forEach(p => { const label = el('label', 'provider-option'); const input = el('input'); input.type = 'radio'; input.name = 'project-provider'; input.value = p.id; input.checked = p.id === preferred; input.required = true; const text = el('span', '', p.name || providerNames[p.id] || p.id); label.append(input, text); options.append(label); }); wrap.append(options); body.append(wrap); if (!preferred) $('dialog-submit').disabled = true; }
-  function createProject() { openDialog('新建项目', 'NEW RESEARCH PROJECT', body => { field(body, '项目名称', 'new-project-name', { required: true, maxLength: 120, placeholder: '例如：InfiniteWorld' }); field(body, '研究简介', 'new-project-description', { tag: 'textarea', maxLength: 2000, placeholder: '这篇研究希望回答什么问题？' }); providerChoices(body); field(body, '模型（可选）', 'new-project-model', { placeholder: '使用助手默认模型' }); field(body, '已有会话 ID（可选）', 'new-project-session', { placeholder: '接续已有的 Codex / Claude 会话' });  }, async () => { const provider = $('dialog-form').querySelector('input[name="project-provider"]:checked')?.value; const payload = { name: $('new-project-name').value.trim(), description: $('new-project-description').value.trim(), provider }; if ($('new-project-model').value.trim()) payload.model = $('new-project-model').value.trim(); if ($('new-project-session').value.trim()) payload.native_session_id = $('new-project-session').value.trim(); const p = await api('/projects', { method: 'POST', body: payload }); const project = p.project || p; updateProjectInList(project); await selectProject(project.id); toast('新的研究空间已准备好。'); }, '创建项目'); }
-  function projectSettings() { if (!state.project || !isOwner()) return; const project = { ...state.project }; const busy = !!project.active_turn || Number(project.queued_count) > 0 || project.status === 'running'; const bound = !!project.native_session_id; openDialog('项目设置', 'PROJECT SETTINGS', body => { field(body, '项目名称', 'settings-name', { value: project.name, required: true, maxLength: 120 }); field(body, '研究简介', 'settings-description', { tag: 'textarea', value: project.description, maxLength: 2000 }); body.append(el('p', 'form-help', `项目助手 · ${providerNames[project.provider] || project.provider}`)); field(body, '模型', 'settings-model', { value: project.model, placeholder: '使用助手默认模型', disabled: busy }); field(body, '共享的原生会话 ID', 'settings-session', { value: project.native_session_id, placeholder: '首个任务开始后会自动绑定', disabled: busy || bound }); body.append(el('p', 'form-help', busy ? '正在进行任务。队列清空后可以更改模型；会话已绑定时不可改绑。' : bound ? '该项目已绑定共享会话。为保护共同上下文，绑定后不可改绑；新会话请创建新项目。' : '可以绑定已有会话；首次任务开始后会自动绑定，之后不可改绑。')); if (project.permission_mode === 'full-access') { const badge = el('div', 'permission-badge'); const text = el('div'); text.append(el('strong', '', 'Full access · 完整执行权限'), el('p', '', '此项目由管理员启用完整执行权限。助手可执行研究任务、操作文件和运行工具。')); badge.append(icon('shield'), text); body.append(badge); } }, async () => { const data = { name: $('settings-name').value.trim(), description: $('settings-description').value.trim() }; if (!busy) { const model = $('settings-model').value.trim(); if (model !== (project.model || '')) data.model = model || null; if (!bound) { const native = $('settings-session').value.trim(); if (native) data.native_session_id = native; } } const p = await api(projectAPI('', project.id), { method: 'PATCH', body: data }); const updated = p.project || p; if (state.project?.id === project.id) { state.project = { ...state.project, ...updated }; renderHeader(); } updateProjectInList(updated); toast('项目设置已保存。'); }); }
+  function projectLinkFields(body, prefix, project = {}) {
+    field(body, 'GitHub 仓库', `${prefix}-github`, { type: 'url', value: project.github_url, maxLength: 2048, placeholder: 'https://github.com/owner/repository' });
+    field(body, 'Overleaf 项目', `${prefix}-overleaf`, { type: 'url', value: project.overleaf_url, maxLength: 2048, placeholder: 'https://www.overleaf.com/project/…' });
+    body.append(el('p', 'form-help', '关联这篇论文的代码仓库与 Overleaf 项目。可先创建，稍后补充链接。'));
+  }
+  function projectLinkValues(prefix) { return { github_url: $(`${prefix}-github`).value.trim(), overleaf_url: $(`${prefix}-overleaf`).value.trim() }; }
+  function createProject() {
+    openDialog('新建项目', 'NEW RESEARCH PROJECT', body => {
+      field(body, '项目名称', 'new-project-name', { required: true, maxLength: 120, placeholder: '例如：InfiniteWorld' });
+      field(body, '研究简介', 'new-project-description', { tag: 'textarea', maxLength: 2000, placeholder: '这篇研究希望回答什么问题？' });
+      projectLinkFields(body, 'new-project'); providerChoices(body);
+      field(body, '模型（可选）', 'new-project-model', { placeholder: '使用助手默认模型' });
+      field(body, '已有会话 ID（可选）', 'new-project-session', { placeholder: '接续已有的 Codex / Claude 会话' });
+    }, async () => {
+      const provider = $('dialog-form').querySelector('input[name="project-provider"]:checked')?.value;
+      const payload = { name: $('new-project-name').value.trim(), description: $('new-project-description').value.trim(), provider, ...projectLinkValues('new-project') };
+      if ($('new-project-model').value.trim()) payload.model = $('new-project-model').value.trim();
+      if ($('new-project-session').value.trim()) payload.native_session_id = $('new-project-session').value.trim();
+      const p = await api('/projects', { method: 'POST', body: payload }); const project = p.project || p; updateProjectInList(project); await selectProject(project.id); toast('新的研究空间已准备好。');
+    }, '创建项目');
+  }
+  function projectSettings() {
+    if (!state.project || !isOwner()) return;
+    const project = { ...state.project }; const busy = !!project.active_turn || Number(project.queued_count) > 0 || project.status === 'running'; const bound = !!project.native_session_id;
+    openDialog('项目设置', 'PROJECT SETTINGS', body => {
+      field(body, '项目名称', 'settings-name', { value: project.name, required: true, maxLength: 120 });
+      field(body, '研究简介', 'settings-description', { tag: 'textarea', value: project.description, maxLength: 2000 }); projectLinkFields(body, 'settings', project);
+      body.append(el('p', 'form-help', `项目助手 · ${providerNames[project.provider] || project.provider}`));
+      field(body, '模型', 'settings-model', { value: project.model, placeholder: '使用助手默认模型', disabled: busy });
+      field(body, '共享的原生会话 ID', 'settings-session', { value: project.native_session_id, placeholder: '首个任务开始后会自动绑定', disabled: busy || bound });
+      body.append(el('p', 'form-help', busy ? '正在进行任务。队列清空后可以更改模型；会话已绑定时不可改绑。' : bound ? '该项目已绑定共享会话。为保护共同上下文，绑定后不可改绑；新会话请创建新项目。' : '可以绑定已有会话；首次任务开始后会自动绑定，之后不可改绑。'));
+      if (project.permission_mode === 'full-access') { const badge = el('div', 'permission-badge'); const text = el('div'); text.append(el('strong', '', 'Full access · 完整执行权限'), el('p', '', '此项目由管理员启用完整执行权限。助手可执行研究任务、操作文件和运行工具。')); badge.append(icon('shield'), text); body.append(badge); }
+    }, async () => {
+      const data = { name: $('settings-name').value.trim(), description: $('settings-description').value.trim(), ...projectLinkValues('settings') };
+      if (!busy) { const model = $('settings-model').value.trim(); if (model !== (project.model || '')) data.model = model || null; if (!bound) { const native = $('settings-session').value.trim(); if (native) data.native_session_id = native; } }
+      const p = await api(projectAPI('', project.id), { method: 'PATCH', body: data }); const updated = p.project || p; if (state.project?.id === project.id) { state.project = { ...state.project, ...updated }; renderHeader(); } updateProjectInList(updated); toast('项目设置已保存。');
+    });
+  }
   function addMember() { const pid = state.project?.id; openDialog('添加成员', 'PROJECT MEMBERS', body => { field(body, '团队账号', 'member-username', { required: true, placeholder: '输入已有用户名', autocomplete: 'off' }); field(body, '项目角色', 'member-role-input', { tag: 'select', options: [['editor', '协作者 · 讨论、上传与任务'], ['viewer', '只读成员 · 查看讨论与文件']] });  }, async () => { await api(projectAPI('/members', pid), { method: 'POST', body: { username: $('member-username').value.trim(), role: $('member-role-input').value } }); if (state.project?.id === pid) await refreshMembers(); toast('成员已加入项目。'); }, '添加成员'); }
-  async function manageUsers() { if (state.user?.role !== 'owner') return; openDialog('团队账号', 'TEAM MANAGEMENT', body => { const list = el('div', 'user-admin-list'); list.id = 'admin-users'; list.append(el('p', 'empty-small', '正在加载团队成员…')); body.append(list, el('h3', 'dialog-subhead', '创建新账号')); field(body, '用户名', 'user-create-username', { required: true, autocomplete: 'off', maxLength: 64, placeholder: '例如：editor' }); field(body, '显示名称', 'user-create-name', { maxLength: 120, placeholder: '讨论中显示的名字' }); field(body, '初始密码', 'user-create-password', { required: true, type: 'password', autocomplete: 'new-password', minLength: 8, placeholder: '至少 8 位' }); field(body, '团队角色', 'user-create-role', { tag: 'select', options: [['member', '团队成员'], ['owner', '管理员']] }); }, async () => { await api('/users', { method: 'POST', body: { username: $('user-create-username').value.trim(), display_name: $('user-create-name').value.trim(), password: $('user-create-password').value, role: $('user-create-role').value } }); toast('团队账号已创建。可将对方添加到研究项目。'); }, '创建账号'); try { const d = await api('/users'); const list = $('admin-users'); if (!list) return; list.replaceChildren(); (d.users || []).forEach(u => { const row = el('div', 'user-admin-row'); const info = el('div'); info.append(el('strong', '', name(u)), el('small', '', `@${u.username}`)); row.append(avatar(u), info, el('span', '', roles[u.role] || u.role)); list.append(row); }); } catch (err) { if ($('admin-users')) $('admin-users').replaceChildren(el('p', 'empty-small', err.message)); } }
+  async function manageUsers() {
+    if (state.user?.role !== 'owner') return;
+    let list;
+    openDialog('团队账号', 'TEAM MANAGEMENT', body => {
+      const toolbar = el('div', 'admin-toolbar'); toolbar.append(el('p', 'admin-caption', '统一管理账号与项目权限。'), button('创建账号', 'btn secondary', createUser, 'plus'));
+      list = el('div', 'user-admin-list'); list.id = 'admin-users'; list.append(el('p', 'empty-small', '正在加载团队成员…')); body.append(toolbar, list);
+    }, null);
+    try {
+      const d = await api('/users'); if (!list.isConnected) return; list.replaceChildren();
+      (d.users || []).forEach(u => {
+        const row = button('', 'user-admin-row', () => editUser(u)); row.setAttribute('aria-label', `管理 ${name(u)} 的账号与项目权限`);
+        const info = el('div', 'user-admin-info'); info.append(el('strong', '', name(u)), el('small', '', `@${u.username}`));
+        const status = el('div', 'user-admin-status'); status.append(el('span', 'member-role', roles[u.role] || u.role));
+        if (u.is_active === false) status.append(el('span', 'account-status disabled-account', '已停用'));
+        else if (u.must_change_password) status.append(el('span', 'account-status password-pending', '待修改初始密码'));
+        row.append(avatar(u), info, status, icon('settings')); list.append(row);
+      });
+      if (!d.users?.length) list.append(el('p', 'empty-small', '尚无团队账号。'));
+    } catch (err) { if (list.isConnected) list.replaceChildren(el('p', 'empty-small', err.message), button('重新加载', 'quiet-btn', manageUsers, 'refresh')); }
+  }
+  function createUser() {
+    openDialog('创建账号', 'TEAM MANAGEMENT', body => {
+      body.append(button('返回团队账号', 'quiet-btn admin-back', manageUsers));
+      field(body, '用户名', 'user-create-username', { required: true, autocomplete: 'off', maxLength: 40, placeholder: '例如：editor' });
+      field(body, '显示名称', 'user-create-name', { maxLength: 80, placeholder: '讨论中显示的名字' });
+      body.append(el('p', 'account-password-note', '初始密码与用户名相同。成员首次登录时必须自行修改密码，之后才能进入工作空间。'));
+      field(body, '团队角色', 'user-create-role', { tag: 'select', options: [['member', '团队成员'], ['owner', '管理员']] });
+    }, async () => {
+      const d = await api('/users', { method: 'POST', body: { username: $('user-create-username').value.trim(), display_name: $('user-create-name').value.trim(), role: $('user-create-role').value } });
+      toast('账号已创建。初始密码与用户名相同。'); await editUser(d.user || d); return false;
+    }, '创建并分配项目');
+  }
+  async function editUser(user) {
+    if (state.user?.role !== 'owner') return;
+    const self = String(user.id) === String(state.user.id); const membershipInputs = []; let membershipsLoaded = false; let membersList; let roleInput; let activeInput; let ownerNote;
+    const save = async () => {
+      if (!membershipsLoaded) throw new Error('项目权限仍在加载，请稍后保存。');
+      const body = { display_name: $('user-edit-name').value.trim() }; if (!self) { body.role = roleInput.value; body.is_active = activeInput.checked; }
+      const memberships = membershipInputs.filter(x => ['editor', 'viewer'].includes(x.input.value)).map(x => ({ project_id: x.project_id, role: x.input.value }));
+      const d = await api(`/users/${encodeURIComponent(user.id)}`, { method: 'PATCH', body }); const updated = d.user || d;
+      if (self) { state.user = { ...state.user, ...updated }; $('user-name').textContent = name(state.user); const a = avatar(state.user); a.id = 'user-avatar'; $('user-avatar').replaceWith(a); }
+      try { await api(`/users/${encodeURIComponent(user.id)}/memberships`, { method: 'PUT', body: { memberships } }); }
+      catch (err) { throw new Error(`账号信息已保存，但项目权限未保存。${err.message}`); }
+      if (state.project) await refreshMembers(); toast('账号与项目权限已保存。'); await manageUsers(); return false;
+    };
+    function updateMembershipControls() {
+      const owner = roleInput.value === 'owner'; ownerNote.hidden = !owner;
+      membershipInputs.forEach(x => { x.input.disabled = owner || x.role === 'owner'; });
+    }
+    openDialog('账号设置', `@${user.username}`, body => {
+      body.append(button('返回团队账号', 'quiet-btn admin-back', manageUsers));
+      field(body, '显示名称', 'user-edit-name', { value: user.display_name || user.username, required: true, maxLength: 80 });
+      roleInput = field(body, '团队角色', 'user-edit-role', { tag: 'select', value: user.role, disabled: self, options: [['member', '团队成员'], ['owner', '管理员']] });
+      const activeLabel = el('label', 'checkbox-field'); activeInput = el('input'); activeInput.id = 'user-edit-active'; activeInput.type = 'checkbox'; activeInput.checked = user.is_active !== false; activeInput.disabled = self; activeLabel.append(activeInput, el('span', '', '允许此账号登录')); body.append(activeLabel);
+      if (self) body.append(el('p', 'form-help', '当前账号保留管理员权限。'));
+      body.append(el('h3', 'dialog-subhead', '项目权限'), el('p', 'form-help', '协作者可讨论、上传文件和运行任务；只读成员可查看项目内容。'));
+      ownerNote = el('p', 'account-password-note', '管理员拥有所有 Shui! 项目的最高权限。'); body.append(ownerNote);
+      membersList = el('div', 'account-project-list'); membersList.append(el('p', 'empty-small', '正在加载项目…')); body.append(membersList);
+      roleInput.addEventListener('change', updateMembershipControls); updateMembershipControls();
+      if (!self) {
+        body.append(el('h3', 'dialog-subhead', '登录密码'));
+        const status = el('p', 'form-help', user.must_change_password ? '成员尚未修改初始密码。' : '成员已设置自己的密码。');
+        const reset = button('重置初始密码', 'quiet-btn danger', () => { resetPanel.hidden = false; reset.hidden = true; });
+        const resetPanel = el('div', 'password-reset-confirm'); resetPanel.hidden = true;
+        const cancel = button('取消', 'quiet-btn', () => { resetPanel.hidden = true; reset.hidden = false; });
+        const confirm = button('确认重置', 'btn secondary danger', async () => {
+          confirm.disabled = true; cancel.disabled = true; $('dialog-submit').disabled = true;
+          try { const d = await api(`/users/${encodeURIComponent(user.id)}/reset-password`, { method: 'POST', body: {} }); Object.assign(user, d.user || d); status.textContent = '初始密码已重置为用户名，成员下次登录必须修改密码。'; resetPanel.hidden = true; reset.hidden = false; toast('密码已重置，原有登录已退出。'); }
+          catch (err) { toast(err.message, 'error'); }
+          finally { confirm.disabled = false; cancel.disabled = false; if (state.dialogAction === save) $('dialog-submit').disabled = !membershipsLoaded; }
+        });
+        const actions = el('div', 'reset-actions'); actions.append(cancel, confirm); resetPanel.append(el('p', '', '密码将重置为用户名，原有登录会退出。成员下次登录必须设置新密码。'), actions); body.append(status, reset, resetPanel);
+      }
+    }, save, '保存账号与权限');
+    $('dialog-submit').disabled = true;
+    try {
+      const d = await api(`/users/${encodeURIComponent(user.id)}/memberships`); if (!membersList.isConnected || state.dialogAction !== save) return;
+      membersList.replaceChildren();
+      (d.memberships || []).forEach(m => {
+        const row = el('label', 'account-project-row'); row.append(el('span', '', m.name)); const input = el('select'); input.setAttribute('aria-label', `${m.name} 的项目权限`);
+        const options = m.role === 'owner' ? [['owner', '项目管理员']] : [['', '未加入'], ['editor', '协作者'], ['viewer', '只读成员']];
+        options.forEach(([value, label]) => { const o = el('option', '', label); o.value = value; input.append(o); }); input.value = m.role || ''; row.append(input); membersList.append(row); membershipInputs.push({ project_id: m.project_id, role: m.role, input });
+      });
+      if (!d.memberships?.length) membersList.append(el('p', 'empty-small', '还没有项目，可在创建项目后分配权限。'));
+      membershipsLoaded = true; $('dialog-submit').disabled = false; updateMembershipControls();
+    } catch (err) { if (membersList.isConnected && state.dialogAction === save) membersList.replaceChildren(el('p', 'empty-small', err.message), button('重新加载', 'quiet-btn', () => editUser(user), 'refresh')); }
+  }
   function closeDrawers() { $('sidebar').classList.remove('open'); $('inspector').classList.remove('open'); $('drawer-scrim').classList.remove('visible'); $('drawer-scrim').hidden = true; }
   function openDrawer(id) { closeDrawers(); $(id).classList.add('open'); $('drawer-scrim').hidden = false; $('drawer-scrim').classList.add('visible'); }
   $('login-form').addEventListener('submit', async event => { event.preventDefault(); const submit = $('login-form').querySelector('button'); submit.disabled = true; $('login-error').hidden = true; try { const d = await api('/login', { method: 'POST', body: { username: $('login-username').value.trim(), password: $('login-password').value } }); $('login-password').value = ''; await startSession(d); } catch (err) { $('login-error').textContent = err.message; $('login-error').hidden = false; } finally { submit.disabled = false; } });
-  $('logout').addEventListener('click', async () => { try { await api('/logout', { method: 'POST', body: {} }); showLogin(); } catch (err) { toast(err.message, 'error'); } });
+  $('password-form').addEventListener('submit', async event => {
+    event.preventDefault(); if ($('password-submit').disabled) return;
+    const currentPassword = $('password-current').value; const newPassword = $('password-new').value; const confirmPassword = $('password-confirm').value;
+    $('password-error').hidden = true;
+    try {
+      if ([...newPassword].length < 8 || [...newPassword].length > 256) throw new Error('新密码需要 8–256 位字符。');
+      if (newPassword.toLowerCase() === (state.user?.username || '').toLowerCase()) throw new Error('新密码不能与用户名相同。');
+      if (newPassword === currentPassword) throw new Error('新密码不能与当前密码相同。');
+      if (newPassword !== confirmPassword) throw new Error('两次输入的新密码不一致。');
+      $('password-submit').disabled = true; $('password-logout').disabled = true; $('password-submit').textContent = '正在保存…';
+      const session = await api('/password', { method: 'POST', body: { current_password: currentPassword, new_password: newPassword, confirm_password: confirmPassword } });
+      await startSession(session); toast('密码已更新。');
+    } catch (err) { $('password-error').textContent = err.message; $('password-error').hidden = false; }
+    finally { $('password-submit').disabled = false; $('password-logout').disabled = false; $('password-submit').textContent = '保存并进入工作空间'; }
+  });
+  async function logout() { try { await api('/logout', { method: 'POST', body: {} }); showLogin(); } catch (err) { toast(err.message, 'error'); } }
+  $('logout').addEventListener('click', logout); $('password-logout').addEventListener('click', logout);
   $('create-project').addEventListener('click', createProject); $('welcome-create').addEventListener('click', createProject); $('project-settings').addEventListener('click', projectSettings); $('add-member').addEventListener('click', addMember); $('manage-users').addEventListener('click', manageUsers);
   $('project-search').addEventListener('input', renderProjects); $('composer').addEventListener('submit', sendMessage); $('message-input').addEventListener('input', () => { const t = $('message-input'); t.style.height = 'auto'; t.style.height = `${Math.min(190, t.scrollHeight)}px`; updateComposer(); });
   $('message-input').addEventListener('keydown', event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) { event.preventDefault(); sendMessage(); } });
@@ -276,7 +431,7 @@
   $('open-sidebar').addEventListener('click', () => openDrawer('sidebar')); $('close-sidebar').addEventListener('click', closeDrawers); $('open-inspector').addEventListener('click', () => openDrawer('inspector')); $('close-inspector').addEventListener('click', closeDrawers); $('drawer-scrim').addEventListener('click', closeDrawers);
   $('close-dialog').addEventListener('click', () => { if (!$('dialog-submit').disabled) $('form-dialog').close(); }); $('dialog-cancel').addEventListener('click', () => { if (!$('dialog-submit').disabled) $('form-dialog').close(); });
   $('form-dialog').addEventListener('cancel', event => { if ($('dialog-submit').disabled) event.preventDefault(); });
-  $('dialog-form').addEventListener('submit', async e => { e.preventDefault(); if (!state.dialogAction) return; $('dialog-submit').disabled = true; $('dialog-error').hidden = true; try { await state.dialogAction(); $('form-dialog').close(); } catch (err) { $('dialog-error').textContent = err.message; $('dialog-error').hidden = false; } finally { $('dialog-submit').disabled = false; } });
+  $('dialog-form').addEventListener('submit', async e => { e.preventDefault(); const action = state.dialogAction; if (!action || $('dialog-submit').disabled) return; $('dialog-submit').disabled = true; $('dialog-error').hidden = true; try { const close = await action(); if (close !== false && state.dialogAction === action) $('form-dialog').close(); } catch (err) { if (state.dialogAction === action) { $('dialog-error').textContent = err.message; $('dialog-error').hidden = false; } } finally { if (state.dialogAction === action) $('dialog-submit').disabled = false; } });
   $('close-preview').addEventListener('click', () => $('preview-dialog').close()); $('preview-dialog').addEventListener('close', () => { $('pdf-preview').removeAttribute('src'); });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawers(); });
   document.querySelectorAll('[data-tab]').forEach(b => { b.setAttribute('aria-controls', `panel-${b.dataset.tab}`); b.addEventListener('keydown', e => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return; e.preventDefault(); const tabs = [...document.querySelectorAll('[data-tab]')]; const index = tabs.indexOf(b); const next = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (index + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length; tabs[next].focus(); tabs[next].click(); }); });

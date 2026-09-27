@@ -85,4 +85,9 @@ project when starting a separate conversation.
 The service includes no public registration. Invite collaborators by creating
 their account as Owner and assigning their project role. Password recovery is
 available locally with `shui reset-password USERNAME`, which revokes old web
-sessions. Do not commit `.env`, databases, owner-login files, or native credentials.
+sessions and requires the account to choose a new password at next login.
+The Owner web screen also resets another account to its username as its initial
+password. Do not commit `.env`, databases, owner-login files, or native credentials.
+
+Schema additions migrate automatically at startup. Back up SQLite before an
+upgrade; existing Owner credentials and native project bindings are preserved.
