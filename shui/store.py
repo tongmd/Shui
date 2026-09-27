@@ -7,9 +7,11 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import secrets
 import sqlite3
 from pathlib import Path
+from urllib.parse import quote
 
 
 def now():
@@ -84,6 +86,14 @@ class Store:
             CREATE TABLE IF NOT EXISTS presence(project_id TEXT NOT NULL REFERENCES projects(id),user_id TEXT NOT NULL REFERENCES users(id),seen REAL NOT NULL,PRIMARY KEY(project_id,user_id));
             CREATE TABLE IF NOT EXISTS bridge_state(project_id TEXT PRIMARY KEY REFERENCES projects(id),session_id TEXT NOT NULL,last_seen REAL NOT NULL,phase TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS migrations(source_key TEXT PRIMARY KEY,project_id TEXT NOT NULL,created_at TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS experiments(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',objective TEXT NOT NULL DEFAULT '',claim TEXT NOT NULL DEFAULT '',validation TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'planned' CHECK(status IN ('planned','running','completed','failed','blocked')),result_summary TEXT NOT NULL DEFAULT '',metadata TEXT NOT NULL DEFAULT '{}',created_by TEXT REFERENCES users(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS experiment_project ON experiments(project_id,updated_at,id);
+            CREATE TABLE IF NOT EXISTS figures(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),experiment_id TEXT REFERENCES experiments(id) ON DELETE SET NULL,title TEXT NOT NULL,path TEXT NOT NULL,caption TEXT NOT NULL DEFAULT '',claim TEXT NOT NULL DEFAULT '',validation TEXT NOT NULL DEFAULT '',kind TEXT NOT NULL DEFAULT 'figure',mime_type TEXT NOT NULL DEFAULT '',size INTEGER,sha256 TEXT,created_by TEXT REFERENCES users(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS figure_project ON figures(project_id,updated_at,id);
+            CREATE TABLE IF NOT EXISTS claims(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),experiment_id TEXT REFERENCES experiments(id) ON DELETE SET NULL,statement TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'proposed' CHECK(status IN ('proposed','supported','partial','refuted','unverified')),evidence TEXT NOT NULL DEFAULT '',metadata TEXT NOT NULL DEFAULT '{}',created_by TEXT REFERENCES users(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS claim_project ON claims(project_id,updated_at,id);
+            CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),experiment_id TEXT REFERENCES experiments(id) ON DELETE SET NULL,metric TEXT NOT NULL DEFAULT '',value TEXT NOT NULL DEFAULT '',unit TEXT NOT NULL DEFAULT '',model TEXT NOT NULL DEFAULT '',summary TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'observed' CHECK(status IN ('observed','supports','partial','contradicts','inconclusive')),metadata TEXT NOT NULL DEFAULT '{}',created_by TEXT REFERENCES users(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS result_project ON results(project_id,updated_at,id);
             """)
             c.execute("BEGIN IMMEDIATE")
             user_columns = {row[1] for row in c.execute("PRAGMA table_info(users)")}
@@ -236,6 +246,460 @@ class Store:
             if f:
                 out["attachments"].append(self.file(f))
         return out
+
+    @staticmethod
+    def _json(value, fallback):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return fallback
+        return parsed
+
+    def experiment(self, row):
+        metadata = self._json(row["metadata"], {})
+        return {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "name": row["name"],
+            "title": row["name"],
+            "description": row["description"],
+            "objective": row["objective"],
+            "claim": row["claim"],
+            "validation": row["validation"],
+            "status": row["status"],
+            "result_summary": row["result_summary"],
+            "metadata": metadata,
+            "created_by": row["created_by"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def figure(self, row):
+        out = {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "experiment_id": row["experiment_id"],
+            "title": row["title"],
+            "name": row["title"],
+            "path": row["path"],
+            "caption": row["caption"],
+            "claim": row["claim"],
+            "validation": row["validation"],
+            "purpose": row["claim"] or row["validation"],
+            "kind": row["kind"],
+            "mime_type": row["mime_type"],
+            "size": row["size"],
+            "sha256": row["sha256"],
+            "created_by": row["created_by"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+        out["download_url"] = (
+            f"/api/projects/{row['project_id']}/artifact?path="
+            f"{quote(row['path'], safe='/')}&inline=1"
+        )
+        out["preview_url"] = out["download_url"]
+        return out
+
+    def claim(self, row):
+        return {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "experiment_id": row["experiment_id"],
+            "statement": row["statement"],
+            "status": row["status"],
+            "evidence": row["evidence"],
+            "metadata": self._json(row["metadata"], {}),
+            "created_by": row["created_by"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def result(self, row):
+        return {
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "experiment_id": row["experiment_id"],
+            "metric": row["metric"],
+            "value": row["value"],
+            "unit": row["unit"],
+            "model": row["model"],
+            "summary": row["summary"],
+            "result": row["summary"] or row["value"],
+            "status": row["status"],
+            "metadata": self._json(row["metadata"], {}),
+            "created_by": row["created_by"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def research(self, c, project_id):
+        experiments = [
+            self.experiment(row)
+            for row in c.execute(
+                "SELECT * FROM experiments WHERE project_id=? ORDER BY updated_at DESC,id DESC",
+                (project_id,),
+            ).fetchall()
+        ]
+        figures = [
+            self.figure(row)
+            for row in c.execute(
+                "SELECT * FROM figures WHERE project_id=? ORDER BY updated_at DESC,id DESC",
+                (project_id,),
+            ).fetchall()
+        ]
+        claims = [
+            self.claim(row)
+            for row in c.execute(
+                "SELECT * FROM claims WHERE project_id=? ORDER BY updated_at DESC,id DESC",
+                (project_id,),
+            ).fetchall()
+        ]
+        results = [
+            self.result(row)
+            for row in c.execute(
+                "SELECT * FROM results WHERE project_id=? ORDER BY updated_at DESC,id DESC",
+                (project_id,),
+            ).fetchall()
+        ]
+        for experiment in experiments:
+            eid = experiment["id"]
+            experiment["figure_ids"] = [
+                figure["id"] for figure in figures if figure["experiment_id"] == eid
+            ]
+            linked = [result for result in results if result["experiment_id"] == eid]
+            experiment["results"] = linked
+            experiment["metric"] = linked[0]["metric"] if linked else ""
+            experiment["result"] = (
+                (linked[0]["summary"] or linked[0]["value"])
+                if linked
+                else experiment["result_summary"]
+            )
+            experiment["findings"] = [
+                result["summary"] for result in linked if result["summary"]
+            ]
+        updated = [
+            item["updated_at"]
+            for group in (experiments, figures, claims, results)
+            for item in group
+        ]
+        summaries = [result["summary"] for result in results if result["summary"]]
+        statuses = {experiment["status"] for experiment in experiments}
+        aggregate_status = (
+            "completed"
+            if statuses and statuses <= {"completed"}
+            else (
+                "running"
+                if "running" in statuses
+                else ("planned" if statuses else "empty")
+            )
+        )
+        return {
+            "summary": {
+                "experiment_count": len(experiments),
+                "figure_count": len(figures),
+                "claim_count": len(claims),
+                "validation_count": sum(
+                    1
+                    for item in claims
+                    if item["status"] in ("supported", "partial", "refuted")
+                ),
+                "result_count": len(results),
+                "result_summary": summaries[0] if summaries else "",
+                "status": aggregate_status,
+                "updated_at": max(updated) if updated else None,
+            },
+            "experiments": experiments,
+            "figures": figures,
+            "claims": claims,
+            "results": results,
+        }
+
+    @staticmethod
+    def _manifest_text(item, key, limit, default=""):
+        value = item.get(key, default)
+        if value is None:
+            return default
+        if not isinstance(value, str) or len(value) > limit:
+            raise ValueError(f"Invalid research manifest field: {key}")
+        return value.strip()
+
+    @staticmethod
+    def _stable_research_id(kind, project_id, identity):
+        digest = hashlib.sha256(
+            f"{kind}\0{project_id}\0{identity}".encode("utf-8")
+        ).hexdigest()
+        return digest[:32]
+
+    def _manifest_figure(self, project_id, raw_path):
+        if not isinstance(raw_path, str) or not raw_path or len(raw_path) > 500:
+            raise ValueError("Invalid figure path")
+        if "\\" in raw_path or "\x00" in raw_path:
+            raise ValueError("Invalid figure path")
+        path = Path(raw_path)
+        forbidden = {
+            ".git", ".env", ".ssh", ".codex", ".claude", ".shui",
+            "auth.json", "credentials.json", "credentials", "id_rsa",
+            "id_ed25519",
+        }
+        if (
+            path.is_absolute()
+            or ".." in path.parts
+            or any(
+                part in forbidden
+                or part.startswith(".env")
+                or part.startswith(".")
+                for part in path.parts
+            )
+        ):
+            raise ValueError("Invalid figure path")
+        root = self.workspace(project_id)
+        if root.is_symlink() or (self.root / "projects").is_symlink():
+            raise ValueError("Invalid project workspace")
+        target = root
+        for part in path.parts:
+            if part in ("", "."):
+                continue
+            target = target / part
+            if target.is_symlink():
+                raise ValueError("Figure paths cannot use symlinks")
+        if not target.resolve().is_relative_to(root.resolve()) or not target.is_file():
+            raise ValueError("Figure must be a file in the project workspace")
+        suffix = target.suffix.lower()
+        media = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+            ".svg": "image/svg+xml",
+            ".pdf": "application/pdf",
+        }
+        if suffix not in media or target.stat().st_size > 100 * 1024 * 1024:
+            raise ValueError("Figure must be an image, SVG, or PDF under 100 MiB")
+        digest = hashlib.sha256()
+        with target.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        return target, media[suffix], digest.hexdigest()
+
+    def sync_research_manifest(self, project_id, created_by):
+        manifest = self.workspace(project_id) / "research.json"
+        if manifest.is_symlink() or not manifest.is_file() or manifest.stat().st_size > 1_000_000:
+            return None
+        try:
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return None
+        if not isinstance(payload, dict) or set(payload) - {
+            "experiments", "figures", "claims", "results"
+        }:
+            return None
+        groups = {}
+        for key in ("experiments", "figures", "claims", "results"):
+            value = payload.get(key, [])
+            if not isinstance(value, list) or len(value) > 100 or not all(
+                isinstance(item, dict) for item in value
+            ):
+                return None
+            groups[key] = value
+
+        try:
+            experiment_ids = {}
+            experiments = []
+            for item in groups["experiments"]:
+                name = self._manifest_text(item, "name", 180) or self._manifest_text(item, "title", 180)
+                if not name:
+                    raise ValueError("Experiment name is required")
+                supplied = item.get("id")
+                if supplied is not None and (
+                    not isinstance(supplied, str)
+                    or not re.fullmatch(r"[0-9a-f]{32}", supplied)
+                ):
+                    raise ValueError("Invalid experiment id")
+                identity = self._manifest_text(item, "key", 180) or name.casefold()
+                eid = supplied or self._stable_research_id("experiment", project_id, identity)
+                experiment_ids[identity] = eid
+                experiment_ids[name] = eid
+                experiment_ids[identity.casefold()] = eid
+                experiment_ids[name.casefold()] = eid
+                status = self._manifest_text(item, "status", 30, "planned")
+                if status not in ("planned", "running", "completed", "failed", "blocked"):
+                    raise ValueError("Invalid experiment status")
+                metadata = item.get("metadata", {})
+                if not isinstance(metadata, dict) or len(json.dumps(metadata, ensure_ascii=False)) > 20000:
+                    raise ValueError("Invalid experiment metadata")
+                experiments.append((
+                    eid, project_id, name,
+                    self._manifest_text(item, "description", 4000),
+                    self._manifest_text(item, "objective", 4000),
+                    self._manifest_text(item, "claim", 4000),
+                    self._manifest_text(item, "validation", 4000),
+                    status,
+                    self._manifest_text(item, "result_summary", 4000) or self._manifest_text(item, "result", 4000),
+                    json.dumps(metadata, ensure_ascii=False), created_by,
+                ))
+
+            def linked_experiment(item):
+                reference = item.get("experiment_id")
+                if reference is None:
+                    reference = item.get("experiment")
+                if reference is None or reference == "":
+                    return None
+                if not isinstance(reference, str) or len(reference) > 180:
+                    raise ValueError("Invalid experiment reference")
+                return experiment_ids.get(reference, experiment_ids.get(reference.casefold(), reference))
+
+            figures = []
+            for item in groups["figures"]:
+                path_text = self._manifest_text(item, "path", 500)
+                target, media, digest = self._manifest_figure(project_id, path_text)
+                title = self._manifest_text(item, "title", 180) or target.name
+                identity = self._manifest_text(item, "key", 500) or path_text
+                supplied = item.get("id")
+                if supplied is not None and (
+                    not isinstance(supplied, str)
+                    or not re.fullmatch(r"[0-9a-f]{32}", supplied)
+                ):
+                    raise ValueError("Invalid figure id")
+                eid = linked_experiment(item)
+                figures.append((
+                    supplied or self._stable_research_id("figure", project_id, identity),
+                    project_id, eid, title, path_text,
+                    self._manifest_text(item, "caption", 4000),
+                    self._manifest_text(item, "claim", 4000) or self._manifest_text(item, "purpose", 4000),
+                    self._manifest_text(item, "validation", 4000),
+                    self._manifest_text(item, "kind", 60, "figure"),
+                    media, target.stat().st_size, digest, created_by,
+                ))
+
+            claims = []
+            for item in groups["claims"]:
+                statement = self._manifest_text(item, "statement", 6000)
+                if not statement:
+                    raise ValueError("Claim statement is required")
+                status = self._manifest_text(item, "status", 30, "proposed")
+                if status not in ("proposed", "supported", "partial", "refuted", "unverified"):
+                    raise ValueError("Invalid claim status")
+                identity = self._manifest_text(item, "key", 500) or statement.casefold()
+                supplied = item.get("id")
+                if supplied is not None and (
+                    not isinstance(supplied, str)
+                    or not re.fullmatch(r"[0-9a-f]{32}", supplied)
+                ):
+                    raise ValueError("Invalid claim id")
+                metadata = item.get("metadata", {})
+                if not isinstance(metadata, dict) or len(json.dumps(metadata, ensure_ascii=False)) > 20000:
+                    raise ValueError("Invalid claim metadata")
+                claims.append((
+                    supplied or self._stable_research_id("claim", project_id, identity),
+                    project_id, linked_experiment(item), statement, status,
+                    self._manifest_text(item, "evidence", 6000),
+                    json.dumps(metadata, ensure_ascii=False), created_by,
+                ))
+
+            results = []
+            for item in groups["results"]:
+                status = self._manifest_text(item, "status", 30, "observed")
+                if status not in ("observed", "supports", "partial", "contradicts", "inconclusive"):
+                    raise ValueError("Invalid result status")
+                metric = self._manifest_text(item, "metric", 180)
+                model = self._manifest_text(item, "model", 180)
+                value = self._manifest_text(item, "value", 500)
+                summary = self._manifest_text(item, "summary", 4000) or self._manifest_text(item, "result", 4000)
+                identity = self._manifest_text(item, "key", 500) or "|".join(
+                    (
+                        str(item.get("experiment_id", item.get("experiment", ""))),
+                        metric.casefold(),
+                        model.casefold(),
+                        self._manifest_text(item, "unit", 80).casefold(),
+                    )
+                )
+                supplied = item.get("id")
+                if supplied is not None and (
+                    not isinstance(supplied, str)
+                    or not re.fullmatch(r"[0-9a-f]{32}", supplied)
+                ):
+                    raise ValueError("Invalid result id")
+                metadata = item.get("metadata", {})
+                if not isinstance(metadata, dict) or len(json.dumps(metadata, ensure_ascii=False)) > 20000:
+                    raise ValueError("Invalid result metadata")
+                results.append((
+                    supplied or self._stable_research_id("result", project_id, identity),
+                    project_id, linked_experiment(item), metric, value,
+                    self._manifest_text(item, "unit", 80), model, summary, status,
+                    json.dumps(metadata, ensure_ascii=False), created_by,
+                ))
+        except (ValueError, TypeError):
+            return None
+
+        tables = {
+            "experiments": [row[0] for row in experiments],
+            "figures": [row[0] for row in figures],
+            "claims": [row[0] for row in claims],
+            "results": [row[0] for row in results],
+        }
+        with self.connect() as c:
+            if not c.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+                return None
+            existing_experiments = {
+                row["id"]
+                for row in c.execute(
+                    "SELECT id FROM experiments WHERE project_id=?", (project_id,)
+                )
+            }
+            valid_experiments = existing_experiments | set(tables["experiments"])
+            if any(
+                row[2] and row[2] not in valid_experiments
+                for row in figures + claims + results
+            ):
+                return None
+            for table, ids in tables.items():
+                if any(
+                    c.execute(
+                        f"SELECT 1 FROM {table} WHERE id=? AND project_id!=?",
+                        (item_id, project_id),
+                    ).fetchone()
+                    for item_id in ids
+                ):
+                    return None
+
+        with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            for row in experiments:
+                c.execute(
+                    "INSERT INTO experiments(id,project_id,name,description,objective,claim,validation,status,result_summary,metadata,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,objective=excluded.objective,claim=excluded.claim,validation=excluded.validation,status=excluded.status,result_summary=excluded.result_summary,metadata=excluded.metadata,updated_at=excluded.updated_at "
+                    "WHERE experiments.project_id=excluded.project_id",
+                    (*row, now(), now()),
+                )
+            for row in figures:
+                existing = c.execute(
+                    "SELECT id FROM figures WHERE project_id=? AND path=?",
+                    (project_id, row[4]),
+                ).fetchone()
+                if existing and existing["id"] != row[0]:
+                    row = (existing["id"], *row[1:])
+                c.execute(
+                    "INSERT INTO figures(id,project_id,experiment_id,title,path,caption,claim,validation,kind,mime_type,size,sha256,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET experiment_id=excluded.experiment_id,title=excluded.title,path=excluded.path,caption=excluded.caption,claim=excluded.claim,validation=excluded.validation,kind=excluded.kind,mime_type=excluded.mime_type,size=excluded.size,sha256=excluded.sha256,updated_at=excluded.updated_at WHERE figures.project_id=excluded.project_id",
+                    (*row, now(), now()),
+                )
+            for row in claims:
+                c.execute(
+                    "INSERT INTO claims(id,project_id,experiment_id,statement,status,evidence,metadata,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET experiment_id=excluded.experiment_id,statement=excluded.statement,status=excluded.status,evidence=excluded.evidence,metadata=excluded.metadata,updated_at=excluded.updated_at WHERE claims.project_id=excluded.project_id",
+                    (*row, now(), now()),
+                )
+            for row in results:
+                c.execute(
+                    "INSERT INTO results(id,project_id,experiment_id,metric,value,unit,model,summary,status,metadata,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET experiment_id=excluded.experiment_id,metric=excluded.metric,value=excluded.value,unit=excluded.unit,model=excluded.model,summary=excluded.summary,status=excluded.status,metadata=excluded.metadata,updated_at=excluded.updated_at WHERE results.project_id=excluded.project_id",
+                    (*row, now(), now()),
+                )
+            insights = self.research(c, project_id)
+            self.event(c, project_id, "research.updated", {"insights": insights})
+            return insights
 
     def project(self, c, row, user):
         out = dict(row)

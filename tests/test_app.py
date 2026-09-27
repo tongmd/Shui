@@ -184,6 +184,105 @@ def test_idempotent_messages_and_queue_order(workspace):
     )
 
 
+def test_research_insights_aggregate_and_validate_figures(workspace):
+    app, clients, _, pid = workspace
+    owner = clients["owner"]
+    root = f"/api/projects/{pid}"
+    figure_dir = app.state.store.workspace(pid) / "figures"
+    figure_dir.mkdir()
+    figure_path = figure_dir / "main.png"
+    figure_path.write_bytes(b"\x89PNG\r\n\x1a\nfigure")
+    payload = {
+        "experiments": [
+            {
+                "name": "Scaling study",
+                "objective": "Test the proposed metric",
+                "claim": "The metric tracks the target behavior",
+                "validation": "Compare against annotated examples",
+                "status": "completed",
+                "result_summary": "Consistent across evaluated models",
+            }
+        ],
+        "claims": [
+            {
+                "statement": "The metric tracks the target behavior",
+                "status": "supported",
+                "evidence": "Scaling study",
+            }
+        ],
+        "results": [
+            {
+                "metric": "accuracy",
+                "value": "0.84",
+                "unit": "score",
+                "model": "Model A",
+                "summary": "Improves over the reference",
+                "status": "supports",
+            }
+        ],
+    }
+    response = owner.post(root + "/research", json=payload)
+    assert response.status_code == 200, response.text
+    insights = response.json()["insights"]
+    assert insights["summary"]["experiment_count"] == 1
+    assert insights["summary"]["claim_count"] == 1
+    assert insights["summary"]["result_count"] == 1
+    experiment = insights["experiments"][0]
+    claim = insights["claims"][0]
+    result = insights["results"][0]
+    response = owner.post(
+        root + "/research",
+        json={
+            "experiments": [{"id": experiment["id"], "name": experiment["name"]}],
+            "figures": [
+                {
+                    "title": "Main result",
+                    "path": "figures/main.png",
+                    "experiment_id": experiment["id"],
+                    "caption": "Metric comparison",
+                    "claim": claim["statement"],
+                }
+            ],
+            "claims": [{"id": claim["id"], "statement": claim["statement"], "status": "supported"}],
+            "results": [{"id": result["id"], "experiment_id": experiment["id"], "summary": result["summary"], "status": "supports"}],
+        },
+    )
+    assert response.status_code == 200, response.text
+    insights = owner.get(root).json()["insights"]
+    assert insights["summary"]["figure_count"] == 1
+    assert insights["figures"][0]["path"] == "figures/main.png"
+    assert insights["experiments"][0]["figure_ids"] == [insights["figures"][0]["id"]]
+    assert insights["experiments"][0]["results"][0]["summary"] == "Improves over the reference"
+    preview = owner.get(insights["figures"][0]["download_url"])
+    assert preview.status_code == 200
+    assert preview.headers["content-type"] == "image/png"
+    assert preview.headers["content-disposition"].startswith("inline;")
+    assert "sandbox" in preview.headers["content-security-policy"]
+    assert owner.get(insights["figures"][0]["download_url"].replace("&inline=1", "")).headers[
+        "content-disposition"
+    ].startswith("attachment;")
+    svg_path = app.state.store.workspace(pid) / "figures" / "unsafe.svg"
+    svg_path.write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)">'
+        '<script>alert(1)</script><circle cx="3" cy="3" r="2"/></svg>',
+        encoding="utf-8",
+    )
+    svg_response = owner.get(
+        f"/api/projects/{pid}/artifact?path=figures/unsafe.svg&inline=1"
+    )
+    assert svg_response.status_code == 200
+    assert svg_response.headers["content-type"].startswith("image/svg+xml")
+    assert "sandbox" in svg_response.headers["content-security-policy"]
+    assert b"script" not in svg_response.content
+    assert b"onload" not in svg_response.content
+    assert owner.post(
+        root + "/research",
+        json={"figures": [{"title": "Unsafe", "path": "../outside.png"}]},
+    ).status_code == 400
+    other = owner.post("/api/projects", json={"name": "Other paper"}).json()["id"]
+    assert owner.get(f"/api/projects/{other}/research").json()["insights"]["summary"]["experiment_count"] == 0
+
+
 def test_session_binding_is_unique_and_cannot_be_replaced(workspace):
     _, clients, _, pid = workspace
     owner = clients["owner"]

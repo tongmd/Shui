@@ -17,7 +17,7 @@ This is proxy environment configuration, not an OS egress firewall. Full-access 
 | `SHUI_PROXY_URL` | Required | Explicit child-process proxy |
 | `SHUI_CODEX_BIN` | `codex` on PATH | Codex executable path, not a shell command |
 | `SHUI_CLAUDE_BIN` | `claude` on PATH | Claude executable path, not a shell command |
-| `SHUI_CODEX_MODEL` | `gpt-5.5` | Codex model when a project does not specify one |
+| `SHUI_CODEX_MODEL` | `gpt-5.6-sol` | Codex model when a project does not specify one |
 | `SHUI_AGENT_TIMEOUT_SECONDS` | `3600` | Maximum turn wall time |
 | `SHUI_AGENT_IDLE_TIMEOUT_SECONDS` | `600` | Maximum wait between protocol records |
 | `SHUI_AGENT_HANDSHAKE_TIMEOUT_SECONDS` | `60` | Codex initialization and thread binding |

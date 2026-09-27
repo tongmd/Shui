@@ -12,6 +12,14 @@ and an ordered task queue. Each message records its author. Every collaborator
 continues the project's existing native agent conversation. Projects run in
 parallel; turns within a project run in order.
 
+Each project also has a **Research** panel. It lists experiments, the claim and
+validation target for each one, current results, and paper figures. PNG, JPEG,
+WebP, GIF, SVG, and PDF figures produced in the project workspace appear as
+soon as the files are stable and open in an inline preview. The agent maintains
+`research.json` in the workspace root to connect figures to experiments and
+record their claims, validation methods, and findings. Existing entries are
+updated by stable key; numeric result values remain exact strings.
+
 ## Start locally
 
 Requires Python 3.11+ on macOS or Linux, and at least one installed, signed-in
@@ -97,7 +105,7 @@ documents the settings; Shui does not automatically load `.env` files.
 | `SHUI_PORT` | `18940` | Web port |
 | `SHUI_PUBLIC_ORIGIN` | `http://127.0.0.1:18940` | Exact browser origin, including scheme and port |
 | `SHUI_PROXY_URL` | `http://127.0.0.1:7890` with `shui serve` | Required proxy for agent child processes |
-| `SHUI_CODEX_MODEL` | `gpt-5.5` | Default Codex model; project settings take precedence |
+| `SHUI_CODEX_MODEL` | `gpt-5.6-sol` | Default Codex model; project settings take precedence |
 | `SHUI_CODEX_BIN` | `codex` | Executable name or absolute path |
 | `SHUI_CLAUDE_BIN` | `claude` | Executable name or absolute path |
 | `SHUI_AGENT_TIMEOUT_SECONDS` | `3600` | Maximum time for one agent turn, up to 86400 |

@@ -1,6 +1,7 @@
 """Queue integration tests use in-memory fake agent behavior, never inference."""
 
 import asyncio
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -276,3 +277,152 @@ async def test_only_one_worker_can_own_data_directory(queued_app):
             await second.start()
     finally:
         await first.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_research_manifest_is_upserted_with_stable_ids(queued_app):
+    app, client, pid = queued_app
+    store = app.state.store
+    queue(client, pid, "record-experiment")
+    queue(client, pid, "update-experiment")
+    figure_dir = store.workspace(pid) / "figures"
+    figure_dir.mkdir()
+    (figure_dir / "main.png").write_bytes(b"\x89PNG\r\n\x1a\nplot")
+    calls = 0
+
+    async def runner(request, emit, cancel):
+        nonlocal calls
+        calls += 1
+        assert "research.json" in request.prompt
+        value = "0.8100000000000001" if calls == 1 else "0.8200000000000001"
+        (request.workspace / "research.json").write_text(
+            json.dumps(
+                {
+                    "experiments": [
+                        {
+                            "key": "main-evaluation",
+                            "name": "Main evaluation",
+                            "objective": "Test a claim",
+                            "claim": "Models track the target",
+                            "validation": "Compare against controls",
+                            "status": "completed",
+                            "result_summary": f"Observed {value}",
+                        }
+                    ],
+                    "figures": [
+                        {
+                            "key": "main-figure",
+                            "title": "Main result",
+                            "path": "figures/main.png",
+                            "experiment": "Main evaluation",
+                            "caption": "Comparison",
+                            "claim": "Models track the target",
+                        }
+                    ],
+                    "claims": [
+                        {
+                            "key": "tracking-claim",
+                            "statement": "Models track the target",
+                            "status": "supported",
+                            "evidence": "Main evaluation",
+                            "experiment": "Main evaluation",
+                        }
+                    ],
+                    "results": [
+                        {
+                            "key": "main-score",
+                            "experiment": "Main evaluation",
+                            "metric": "accuracy",
+                            "value": value,
+                            "unit": "score",
+                            "model": "Model A",
+                            "summary": f"Observed {value}",
+                            "status": "supports",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return RunResult("research-session", "Updated research")
+
+    coordinator = Coordinator(store, runner)
+    await coordinator.start()
+    try:
+        await finish(coordinator)
+        data = client.get(f"/api/projects/{pid}/research").json()["insights"]
+        assert data["summary"]["experiment_count"] == 1
+        assert data["summary"]["figure_count"] == 1
+        assert data["summary"]["claim_count"] == 1
+        assert data["summary"]["result_count"] == 1
+        assert data["results"][0]["value"] == "0.8200000000000001"
+        assert data["figures"][0]["download_url"].endswith(
+            "path=figures/main.png&inline=1"
+        )
+        events = [
+            json.loads(row["payload"])
+            for row in rows(
+                store,
+                "SELECT payload FROM events WHERE project_id=? AND type='research.updated' ORDER BY id",
+                (pid,),
+            )
+        ]
+        assert len(events) == 2
+        assert events[0]["insights"]["experiments"][0]["id"] == data["experiments"][0]["id"]
+        assert events[1]["insights"]["experiments"][0]["id"] == data["experiments"][0]["id"]
+    finally:
+        await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_generated_figure_emits_artifact_event_while_turn_is_running(queued_app):
+    app, _, pid = queued_app
+    store = app.state.store
+    root = store.workspace(pid)
+    user_id = rows(store, "SELECT id FROM users WHERE username='owner'")[0]["id"]
+    stop = asyncio.Event()
+    coordinator = Coordinator(store)
+    watcher = asyncio.create_task(coordinator._watch_artifacts(pid, root, user_id, stop))
+    try:
+        await asyncio.sleep(0)
+        figure_dir = root / "figures"
+        figure_dir.mkdir()
+        data = b"\x89PNG\r\n\x1a\nplot-bytes"
+        (figure_dir / "live.png").write_bytes(data)
+        await asyncio.sleep(3.4)
+        events = rows(store, "SELECT payload FROM events WHERE project_id=? AND type='artifact.changed'", (pid,))
+        assert len(events) == 1
+        event = json.loads(events[0]["payload"])
+        assert event["path"] == "figures/live.png"
+        assert event["mime_type"] == "image/png"
+        assert event["size"] == len(data)
+        assert len(event["sha256"]) == 64
+        assert rows(store, "SELECT path FROM figures WHERE project_id=?", (pid,)) == [
+            {"path": "figures/live.png"}
+        ]
+        (root / "research.json").write_text(
+            json.dumps({"figures": [{"key": "paper-fig-1", "title": "Main result", "path": "figures/live.png", "claim": "The effect persists"}]}),
+            encoding="utf-8",
+        )
+        store.sync_research_manifest(pid, user_id)
+        figures = rows(store, "SELECT path,title,claim FROM figures WHERE project_id=?", (pid,))
+        assert figures == [{"path": "figures/live.png", "title": "Main result", "claim": "The effect persists"}]
+    finally:
+        stop.set()
+        await watcher
+
+
+def test_research_manifest_rejects_unsafe_paths_atomically(queued_app):
+    app, _, pid = queued_app
+    store = app.state.store
+    store.workspace(pid).joinpath("research.json").write_text(
+        json.dumps(
+            {
+                "experiments": [{"name": "Unsafe figure"}],
+                "figures": [{"title": "Escape", "path": "../outside.png"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert store.sync_research_manifest(pid, None) is None
+    assert rows(store, "SELECT id FROM experiments WHERE project_id=?", (pid,)) == []

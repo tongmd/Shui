@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import mimetypes
 import os
 import re
 import secrets
@@ -12,13 +13,14 @@ import sqlite3
 import sysconfig
 import time
 import unicodedata
+import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from .agents import provider_status
 from .store import Store, now, password_hash, uid, verify_password
@@ -40,6 +42,80 @@ FORBIDDEN_NAMES = {
     "id_ed25519",
     ".shui",
 }
+SVG_TAGS = {
+    "svg", "g", "defs", "symbol", "title", "desc", "path", "rect", "circle",
+    "ellipse", "line", "polyline", "polygon", "text", "tspan", "clipPath",
+    "mask", "linearGradient", "radialGradient", "stop", "pattern", "marker",
+}
+SVG_ATTRIBUTES = {
+    "id", "class", "viewBox", "width", "height", "x", "y", "x1", "y1", "x2",
+    "y2", "cx", "cy", "r", "rx", "ry", "d", "points", "transform",
+    "preserveAspectRatio", "fill", "fill-opacity", "fill-rule", "stroke",
+    "stroke-width", "stroke-linecap", "stroke-linejoin", "stroke-dasharray",
+    "stroke-dashoffset", "stroke-opacity", "opacity", "clip-path", "clip-rule",
+    "mask", "marker-start", "marker-mid", "marker-end", "gradientUnits",
+    "gradientTransform", "spreadMethod", "offset", "stop-color", "stop-opacity",
+    "font-family", "font-size", "font-weight", "text-anchor", "dominant-baseline",
+    "dx", "dy", "letter-spacing", "role", "aria-label",
+}
+SVG_LOCAL_URL = re.compile(r"url\(\s*['\"]?#[-A-Za-z0-9_.:]+['\"]?\s*\)\Z", re.I)
+
+
+def sanitize_svg(data: bytes) -> bytes | None:
+    if len(data) > 5 * 1024 * 1024:
+        return None
+    upper = data.upper()
+    if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
+        return None
+    try:
+        root = ET.fromstring(data)
+        nodes = list(root.iter())
+    except (ET.ParseError, RecursionError, ValueError):
+        return None
+    if len(nodes) > 50000:
+        return None
+
+    def local_name(name):
+        return name.rsplit("}", 1)[-1].split(":")[-1]
+
+    if local_name(root.tag) != "svg":
+        return None
+
+    def clean(source, depth=0):
+        if depth > 100:
+            return None
+        tag = local_name(source.tag)
+        if tag not in SVG_TAGS:
+            return None
+        target = ET.Element(tag)
+        for raw_name, raw_value in source.attrib.items():
+            name = local_name(raw_name)
+            value = raw_value.strip()
+            if name not in SVG_ATTRIBUTES or len(value) > 10000:
+                continue
+            lowered = value.lower()
+            if any(token in lowered for token in ("javascript:", "data:", "file:", "http:", "https:", "expression(", "@import")):
+                continue
+            if "url(" in lowered and not SVG_LOCAL_URL.fullmatch(value):
+                continue
+            if name == "id" and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", value):
+                continue
+            target.set(name, value)
+        if tag == "svg":
+            target.set("xmlns", "http://www.w3.org/2000/svg")
+        target.text = source.text
+        for child in source:
+            safe_child = clean(child, depth + 1)
+            if safe_child is not None:
+                target.append(safe_child)
+        target.tail = source.tail
+        return target
+
+    try:
+        sanitized = clean(root)
+        return ET.tostring(sanitized, encoding="utf-8", xml_declaration=True) if sanitized is not None else None
+    except (ET.ParseError, RecursionError, ValueError):
+        return None
 
 
 def project_link(value, kind):
@@ -749,7 +825,219 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                 "files": [store.file(x) for x in files],
                 "members": [dict(x) for x in members],
                 "events_cursor": cursor,
+                "insights": store.research(c, pid),
             }
+
+    def research_text(data, key, limit, default=""):
+        value = data.get(key, default)
+        if value is None:
+            return default
+        if not isinstance(value, str) or len(value) > limit:
+            raise HTTPException(400, f"Invalid {key}")
+        return value.strip()
+
+    def research_json(data, key):
+        value = data.get(key, {})
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise HTTPException(400, f"Invalid {key}")
+        try:
+            encoded = json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"Invalid {key}")
+        if len(encoded) > 20000:
+            raise HTTPException(400, f"{key} is too large")
+        return value
+
+    def research_id(value, label):
+        if value is None:
+            return None
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{32}", value):
+            raise HTTPException(400, f"Invalid {label}")
+        return value
+
+    def research_list(data, key, limit=200):
+        value = data.get(key, [])
+        if not isinstance(value, list) or len(value) > limit:
+            raise HTTPException(400, f"Invalid {key}")
+        if not all(isinstance(item, dict) for item in value):
+            raise HTTPException(400, f"Invalid {key}")
+        return value
+
+    @app.get("/api/projects/{pid}/research")
+    async def research_get(pid: str, request: Request):
+        access(request, pid)
+        with store.connect() as c:
+            return {"insights": store.research(c, pid)}
+
+    @app.post("/api/projects/{pid}/research")
+    async def research_update(pid: str, request: Request):
+        u, _ = access(request, pid, True)
+        data = await body(request)
+        experiments = research_list(data, "experiments")
+        figures = research_list(data, "figures")
+        claims = research_list(data, "claims")
+        results = research_list(data, "results")
+        allowed = {"experiments", "figures", "claims", "results"}
+        if set(data) - allowed:
+            raise HTTPException(400, "Unsupported research field")
+        with store.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            existing_experiments = {
+                row["id"]
+                for row in c.execute(
+                    "SELECT id FROM experiments WHERE project_id=?", (pid,)
+                )
+            }
+            incoming_experiments = set()
+            for item in experiments:
+                item_id = research_id(item.get("id"), "experiment id")
+                if item_id and item_id not in existing_experiments:
+                    raise HTTPException(404, "Experiment not found")
+                eid = item_id or uid()
+                incoming_experiments.add(eid)
+                name = research_text(item, "name", 180) or research_text(item, "title", 180)
+                if not name:
+                    raise HTTPException(400, "Experiment name is required")
+                status = research_text(item, "status", 30, "planned")
+                if status not in ("planned", "running", "completed", "failed", "blocked"):
+                    raise HTTPException(400, "Invalid experiment status")
+                at = now()
+                values = (
+                    eid,
+                    pid,
+                    name,
+                    research_text(item, "description", 4000),
+                    research_text(item, "objective", 4000),
+                    research_text(item, "claim", 4000),
+                    research_text(item, "validation", 4000),
+                    status,
+                    research_text(item, "result_summary", 4000)
+                    or research_text(item, "result", 4000),
+                    json.dumps(research_json(item, "metadata"), ensure_ascii=False),
+                    u["id"],
+                    at,
+                    at,
+                )
+                c.execute(
+                    "INSERT INTO experiments(id,project_id,name,description,objective,claim,validation,status,result_summary,metadata,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,objective=excluded.objective,claim=excluded.claim,validation=excluded.validation,status=excluded.status,result_summary=excluded.result_summary,metadata=excluded.metadata,updated_at=excluded.updated_at",
+                    values,
+                )
+            existing_figures = {
+                row["id"]
+                for row in c.execute(
+                    "SELECT id FROM figures WHERE project_id=?", (pid,)
+                )
+            }
+            for item in figures:
+                item_id = research_id(item.get("id"), "figure id")
+                if item_id and item_id not in existing_figures:
+                    raise HTTPException(404, "Figure not found")
+                fid = item_id or uid()
+                eid = research_id(item.get("experiment_id"), "experiment id")
+                if eid and eid not in incoming_experiments and not c.execute(
+                    "SELECT 1 FROM experiments WHERE id=? AND project_id=?", (eid, pid)
+                ).fetchone():
+                    raise HTTPException(404, "Experiment not found")
+                path = research_text(item, "path", 500)
+                if not path or Path(path).is_absolute() or ".." in Path(path).parts:
+                    raise HTTPException(400, "Invalid figure path")
+                figure_path = safe_artifact(store.workspace(pid), path)
+                suffix = figure_path.suffix.lower()
+                mime = mimetypes.guess_type(figure_path.name)[0] or ""
+                if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".svg", ".pdf"}:
+                    raise HTTPException(400, "Figure path must be an image, SVG, or PDF")
+                if figure_path.stat().st_size > 100 * 1024 * 1024:
+                    raise HTTPException(413, "Figure exceeds 100 MiB")
+                digest = hashlib.sha256(figure_path.read_bytes()).hexdigest()
+                at = now()
+                values = (
+                    fid,
+                    pid,
+                    eid,
+                    research_text(item, "title", 180) or figure_path.name,
+                    path,
+                    research_text(item, "caption", 4000),
+                    research_text(item, "claim", 4000) or research_text(item, "purpose", 4000),
+                    research_text(item, "validation", 4000),
+                    research_text(item, "kind", 60, "figure"),
+                    mime,
+                    figure_path.stat().st_size,
+                    digest,
+                    u["id"],
+                    at,
+                    at,
+                )
+                c.execute(
+                    "INSERT INTO figures(id,project_id,experiment_id,title,path,caption,claim,validation,kind,mime_type,size,sha256,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET experiment_id=excluded.experiment_id,title=excluded.title,path=excluded.path,caption=excluded.caption,claim=excluded.claim,validation=excluded.validation,kind=excluded.kind,mime_type=excluded.mime_type,size=excluded.size,sha256=excluded.sha256,updated_at=excluded.updated_at",
+                    values,
+                )
+            for item in claims:
+                item_id = research_id(item.get("id"), "claim id")
+                if item_id and not c.execute(
+                    "SELECT 1 FROM claims WHERE id=? AND project_id=?", (item_id, pid)
+                ).fetchone():
+                    raise HTTPException(404, "Claim not found")
+                cid = item_id or uid()
+                eid = research_id(item.get("experiment_id"), "experiment id")
+                if eid and not c.execute(
+                    "SELECT 1 FROM experiments WHERE id=? AND project_id=?", (eid, pid)
+                ).fetchone():
+                    raise HTTPException(404, "Experiment not found")
+                statement = research_text(item, "statement", 6000)
+                if not statement:
+                    raise HTTPException(400, "Claim statement is required")
+                status = research_text(item, "status", 30, "proposed")
+                if status not in ("proposed", "supported", "partial", "refuted", "unverified"):
+                    raise HTTPException(400, "Invalid claim status")
+                at = now()
+                c.execute(
+                    "INSERT INTO claims(id,project_id,experiment_id,statement,status,evidence,metadata,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET experiment_id=excluded.experiment_id,statement=excluded.statement,status=excluded.status,evidence=excluded.evidence,metadata=excluded.metadata,updated_at=excluded.updated_at",
+                    (
+                        cid, pid, eid, statement, status,
+                        research_text(item, "evidence", 6000),
+                        json.dumps(research_json(item, "metadata"), ensure_ascii=False),
+                        u["id"], at, at,
+                    ),
+                )
+            for item in results:
+                item_id = research_id(item.get("id"), "result id")
+                if item_id and not c.execute(
+                    "SELECT 1 FROM results WHERE id=? AND project_id=?", (item_id, pid)
+                ).fetchone():
+                    raise HTTPException(404, "Result not found")
+                rid = item_id or uid()
+                eid = research_id(item.get("experiment_id"), "experiment id")
+                if eid and not c.execute(
+                    "SELECT 1 FROM experiments WHERE id=? AND project_id=?", (eid, pid)
+                ).fetchone():
+                    raise HTTPException(404, "Experiment not found")
+                status = research_text(item, "status", 30, "observed")
+                if status not in ("observed", "supports", "partial", "contradicts", "inconclusive"):
+                    raise HTTPException(400, "Invalid result status")
+                at = now()
+                c.execute(
+                    "INSERT INTO results(id,project_id,experiment_id,metric,value,unit,model,summary,status,metadata,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?, ?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET experiment_id=excluded.experiment_id,metric=excluded.metric,value=excluded.value,unit=excluded.unit,model=excluded.model,summary=excluded.summary,status=excluded.status,metadata=excluded.metadata,updated_at=excluded.updated_at",
+                    (
+                        rid, pid, eid,
+                        research_text(item, "metric", 180),
+                        research_text(item, "value", 500),
+                        research_text(item, "unit", 80),
+                        research_text(item, "model", 180),
+                        research_text(item, "summary", 4000) or research_text(item, "result", 4000),
+                        status,
+                        json.dumps(research_json(item, "metadata"), ensure_ascii=False),
+                        u["id"], at, at,
+                    ),
+                )
+            insights = store.research(c, pid)
+            store.event(c, pid, "research.updated", {"insights": insights, "actor": u["username"]})
+            return {"insights": insights}
 
     @app.patch("/api/projects/{pid}")
     async def project_patch(pid: str, request: Request):
@@ -867,6 +1155,10 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             if not project:
                 return {"ok": True, "deleted": pid}
             for table in (
+                "results",
+                "claims",
+                "figures",
+                "experiments",
                 "presence",
                 "bridge_state",
                 "events",
@@ -1174,15 +1466,53 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             await file.close()
 
     def download(path, name, inline):
-        with path.open("rb") as stream:
-            is_pdf = path.suffix.lower() == ".pdf" and stream.read(5) == b"%PDF-"
-        media = "application/pdf" if is_pdf else "application/octet-stream"
+        suffix = path.suffix.lower()
+        media_by_suffix = {
+            ".pdf": "application/pdf",
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+            ".svg": "image/svg+xml",
+        }
+        media = media_by_suffix.get(suffix, "application/octet-stream")
+        allowed_inline = False
+        if inline and suffix in media_by_suffix:
+            if suffix == ".svg":
+                if path.stat().st_size <= 5 * 1024 * 1024:
+                    safe_svg = sanitize_svg(path.read_bytes())
+                    if safe_svg is not None:
+                        return Response(
+                            safe_svg,
+                            media_type="image/svg+xml",
+                            headers={
+                                "Content-Security-Policy": "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'",
+                                "X-Content-Type-Options": "nosniff",
+                            },
+                        )
+            else:
+                with path.open("rb") as stream:
+                    head = stream.read(4096)
+                if suffix == ".pdf":
+                    allowed_inline = head.startswith(b"%PDF-")
+                elif suffix == ".png":
+                    allowed_inline = head.startswith(b"\x89PNG\r\n\x1a\n")
+                elif suffix in (".jpg", ".jpeg"):
+                    allowed_inline = head.startswith(b"\xff\xd8\xff")
+                elif suffix == ".gif":
+                    allowed_inline = head.startswith((b"GIF87a", b"GIF89a"))
+                elif suffix == ".webp":
+                    allowed_inline = len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WEBP"
         return FileResponse(
             path,
             filename=name,
-            media_type=media,
-            content_disposition_type="inline" if inline and is_pdf else "attachment",
-            headers={"Content-Security-Policy": "sandbox; default-src 'none'"},
+            media_type=media if allowed_inline else "application/octet-stream",
+            content_disposition_type="inline" if allowed_inline else "attachment",
+            headers={
+                "Content-Security-Policy": "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @app.get("/api/projects/{pid}/files/{fid}")

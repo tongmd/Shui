@@ -13,12 +13,12 @@ JSON API under `/api`; all errors `{detail: string}`. Auth cookies are HttpOnly;
 - `POST /api/projects/{id}/messages {content,attachment_ids:[],client_id:uuid}` -> `{message:Message,turn:Turn}`. Owner/editor. Idempotent client_id per project, returns existing request after network retry. User attribution comes from auth, not body.
 - `POST /api/projects/{id}/turns/{turn_id}/cancel` -> `{ok:true}`. Owner/editor. Cancels own queued requests; project owner can cancel any turn. Current running turn can be interrupted by owner or original author.
 - `POST /api/projects/{id}/turns/{turn_id}/retry {client_id:uuid}` -> `{message,turn}` only failed/interrupted turns; never automatic retry after restart.
-- `GET /api/projects/{id}/events?after=cursor` SSE, cookie auth; each event has SSE id and JSON `{id,type,project_id,payload,created_at}`. Durable replay supports `Last-Event-ID`; periodic keepalive. Types `message.created`, `message.updated`, `turn.updated`, `agent.delta`, `agent.tool`, `project.updated`, `file.created`, `member.updated`, `presence`. Payload contains affected `message`/`turn`/`project` objects; agent.delta `{message_id,delta}`, agent.tool `{turn_id,name,status,content}`.
+- `GET /api/projects/{id}/events?after=cursor` SSE, cookie auth; each event has SSE id and JSON `{id,type,project_id,payload,created_at}`. Durable replay supports `Last-Event-ID`; periodic keepalive. Types include `message.created`, `message.updated`, `turn.updated`, `agent.delta`, `agent.tool`, `project.updated`, `file.created`, `artifact.changed`, `research.updated`, `member.updated`, `presence`. Payload contains affected `message`/`turn`/`project` objects; agent.delta `{message_id,delta}`, agent.tool `{turn_id,name,status,content}`.
 - `GET /api/projects/{id}/files` -> `{files:[File]}`.
 - `POST /api/projects/{id}/files` multipart field `file` -> File. Store bytes in project workspace `uploads/{file_id}/{safe_name}`; max 50MiB, sha256 recorded.
 - `GET /api/projects/{id}/files/{file_id}` authenticated download attachment.
 - `GET /api/projects/{id}/workspace?path=` -> `{path,entries:[{name,path,type:'file'|'directory',size}]}` read-only artifact browser. No traversal/symlinks/outside root or .env/auth/git metadata.
-- `GET /api/projects/{id}/artifact?path=` -> authenticated download; safe PDF can preview via browser download URL `&inline=1`.
+- `GET /api/projects/{id}/artifact?path=` -> authenticated download; safe PDF/image/SVG artifacts can preview via browser download URL `&inline=1`.
 - `GET /api/projects/{id}/members` -> `{members:[Member]}`.
 - `POST /api/projects/{id}/members {username,role:'editor'|'viewer'}` owner only.
 - `DELETE /api/projects/{id}/members/{user_id}` owner only.
@@ -31,6 +31,8 @@ JSON API under `/api`; all errors `{detail: string}`. Auth cookies are HttpOnly;
 - `POST /api/password {current_password,new_password,confirm_password}` -> new session payload and rotated cookie/CSRF. New password is 8–256 characters, differs from username ignoring case and from current password, and matches confirmation. Success clears mandatory change and revokes all previous sessions.
 - `POST /api/projects/{id}/presence` -> `{ok:true}` auth, refresh user heartbeat; SSE presence lists currently active members (real browser heartbeats).
 - `GET /api/projects/{id}/activity?after=0` -> `{events:[Event]}` durable audit event list.
+- `GET /api/projects/{id}/research` -> `{insights:{summary,experiments,figures,claims,results}}`; the UI uses each experiment's `claim`, `validation`, and `result_summary`, and each figure's safe workspace `path` or `download_url` for inline preview.
+- `POST /api/projects/{id}/research` -> owner/editor update for structured experiments, figures, claims, and results; emits `research.updated`.
 - `GET /api/projects/{id}/event-batch?after=cursor` -> `{events:[Event]}` up to 200 ordered durable events, including deltas. The browser uses this when a public proxy buffers SSE; both transports deduplicate by event ID and enforce the same project membership.
 - `GET /health` non-sensitive liveness.
 
@@ -54,6 +56,8 @@ repository URL and normalizes `.git`/trailing slashes. Overleaf accepts an HTTPS
 `/project/<24-hex-ID>` URL. Links with credentials, query strings, fragments,
 unexpected hosts, or extra path components are rejected. These are project
 resource associations, not external membership provisioning.
+
+The project detail response also includes an `insights` aggregate, and `GET /api/projects/{id}/research` returns the same payload. `POST /api/projects/{id}/research` lets owners and editors upsert experiments, figures, claims and results. Figure paths must refer to existing image, SVG or PDF files inside the project workspace. Each item can reference an experiment in that project, and writes emit `research.updated`. Result values are stored as text to preserve their original precision.
 
 ## Adapter interface (`shui/agents.py`)
 

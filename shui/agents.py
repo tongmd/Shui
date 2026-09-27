@@ -568,7 +568,7 @@ async def _rpc(run: _Run, method: str, params: dict) -> dict:
 
 
 async def _codex(run: _Run, binary: str) -> None:
-    model = run.request.model or os.environ.get("SHUI_CODEX_MODEL") or "gpt-5.5"
+    model = run.request.model or os.environ.get("SHUI_CODEX_MODEL") or "gpt-5.6-sol"
     await run.spawn(
         [
             binary,
