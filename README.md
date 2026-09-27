@@ -4,6 +4,9 @@
 
 One paper, one project, one shared Codex or Claude Code conversation.
 
+Team deployment: <http://192.0.2.10/shui/> redirects to the current HTTPS
+service. See [public deployment details](docs/PUBLIC_DEPLOYMENT.md).
+
 Shui gives a research team a shared transcript, file uploads, live agent output,
 and an ordered task queue. Each message records its author. Every collaborator
 continues the project's existing native agent conversation. Projects run in
