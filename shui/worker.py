@@ -9,7 +9,7 @@ import mimetypes
 import os
 from pathlib import Path
 
-from .agents import RunRequest, run_agent
+from .agents import RunRequest, _Output, _Redactor, run_agent
 from .store import now
 
 _FIGURE_TYPES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".pdf"}
@@ -89,7 +89,7 @@ class Coordinator:
             self.store.delegation_changed(c, row["child_project_id"], row["id"])
 
     def _delegation_prompt(self, c, delegation, author, content, request=None):
-        brief = dict(request or delegation)
+        brief = self.store.delegation_prompt_brief(c, request) if request else dict(delegation)
         parent = c.execute(
             "SELECT * FROM projects WHERE id=?", (delegation["parent_project_id"],)
         ).fetchone()
@@ -479,6 +479,7 @@ class Coordinator:
                         if item:
                             attached.append(item["relative_path"])
                     content = self.store.message_content(c, row)
+                    secret_values = self.store.project_secret_values(c, project_id)
                     prompt = (
                         f"[Shui! shared paper project: {p['name']} | collaborator: {author['display_name']} (@{author['username']})]\n"
                         "Continue the existing project session. Other collaborators share this same history. "
@@ -529,7 +530,9 @@ class Coordinator:
                 )
                 chunks = []
 
-                async def emit(kind, payload):
+                redactor = _Redactor({}, secret_values)
+
+                async def persist_event(kind, payload):
                     if kind == "session":
                         sid = payload["session_id"]
                         with self.store.connect() as c:
@@ -603,9 +606,27 @@ class Coordinator:
                                 "agent.status",
                                 {
                                     "turn_id": t["id"],
-                                    "text": str(payload.get("text", ""))[:2000],
+                                    "text": redactor.clean(str(payload.get("text", "")))[:2000],
                                 },
                             )
+
+                # Sanitize at the persistence boundary as well as inside native
+                # adapters: runners, final-only responses, and exceptions must
+                # not bypass transcript/event redaction.
+                output = _Output(persist_event, redactor)
+
+                async def emit(kind, payload):
+                    if kind == "delta":
+                        await output.append("answer", str(payload.get("text", "")))
+                    elif kind == "tool":
+                        await output.tool(
+                            str(payload.get("name", "Tool")),
+                            redactor.clean(str(payload.get("status", "running"))),
+                            payload.get("content", ""),
+                            payload.get("event_key"),
+                        )
+                    else:
+                        await persist_event(kind, payload)
 
                 status, error, final = "complete", None, None
                 try:
@@ -619,6 +640,7 @@ class Coordinator:
                             session_id=project["native_session_id"],
                             model=project["model"],
                             project_id=project_id,
+                            secret_values=secret_values,
                         ),
                         emit,
                         cancel,
@@ -637,15 +659,15 @@ class Coordinator:
                         if result.status == "cancelled" or cancel.is_set()
                         else "complete"
                     )
-                    final = result.text or "".join(chunks)
+                    await output.finish()
+                    final = redactor.clean(result.text or "".join(chunks))
                 except asyncio.CancelledError:
                     cancel.set()
                     status = "interrupted"
                     error = "Service stopped. Review completed actions before retrying."
                 except Exception as exc:
                     status = "cancelled" if cancel.is_set() else "failed"
-                    # Adapters provide sanitized errors; no credentials/command environments are included.
-                    error = str(exc)[:1000] or "Agent execution failed."
+                    error = redactor.clean(str(exc))[:1000] or "Agent execution failed."
                 finally:
                     watch_stop.set()
                     await asyncio.gather(watcher, return_exceptions=True)

@@ -257,6 +257,25 @@ def test_cancel_preserves_transcript_and_parent_queue_then_delete_cleans_tree(co
         assert c.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+def test_deleting_project_cascades_private_delegation_credentials(collab):
+    app, clients, users, pid = collab
+    made = assign(
+        collab, content="Use token:synthetic-message-9Wp2",
+        title="Use token:synthetic-title-8Xq3",
+        context="Use token:synthetic-context-7Yr4",
+    )
+    assert made.status_code == 201
+    with app.state.store.connect() as c:
+        assert c.execute("SELECT COUNT(*) FROM message_secrets").fetchone()[0] == 1
+        assert c.execute("SELECT COUNT(*) FROM delegation_request_secrets").fetchone()[0] == 2
+    response = clients["owner"].request("DELETE", f"/api/projects/{pid}", json={"confirm_name": "Parent"})
+    assert response.status_code == 200
+    with app.state.store.connect() as c:
+        for table in ("message_secrets", "delegation_request_secrets", "delegation_requests", "projects"):
+            assert c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+        assert c.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
 def test_merged_artifact_links_keep_child_scope_and_download(collab, tmp_path):
     from urllib.parse import quote
 

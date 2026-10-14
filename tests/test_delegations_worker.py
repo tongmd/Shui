@@ -76,6 +76,52 @@ async def finish(coordinator):
 
 
 @pytest.mark.asyncio
+async def test_private_delegation_brief_reaches_agent_without_history_leak(collaboration_app):
+    app, client, parent, owner, assignee = collaboration_app
+    store = app.state.store
+    secrets = ("synthetic-title-7Axy", "synthetic-context-8Bzq", "synthetic-message-9Cwp")
+    created = delegate(
+        client, parent, assignee,
+        title="Use token:" + secrets[0],
+        context="Repository credential token:" + secrets[1],
+        content="Fetch with token:" + secrets[2],
+    )
+    child = created["delegation"]["child_project_id"]
+    assert all(secret not in json.dumps(created) for secret in secrets)
+    assert client.post(f"/api/projects/{child}/turns/{created['turn']['id']}/cancel").status_code == 200
+    retried = client.post(f"/api/projects/{child}/turns/{created['turn']['id']}/retry", json={
+        "client_id": "retry-private-assignment",
+    })
+    assert retried.status_code == 201
+    assert all(secret not in retried.text for secret in secrets)
+    queue(client, child, "Finish the same task with the supplied credentials")
+    seen = []
+
+    async def runner(request, emit, cancel):
+        seen.append(request)
+        assert all("token:" + secret in request.prompt for secret in secrets)
+        assert set(secrets) <= set(request.secret_values)
+        await emit("session", {"session_id": "private-child-session"})
+        return RunResult("private-child-session", "Values " + " ".join(secrets))
+
+    coordinator = Coordinator(store, runner)
+    await coordinator.start()
+    try:
+        await finish(coordinator)
+        assert len(seen) == 2
+        for project_id in (parent, child):
+            for endpoint in (("messages", "activity", "delegations") if project_id == parent else ("messages", "activity")):
+                response = client.get(f"/api/projects/{project_id}/{endpoint}")
+                assert response.status_code == 200
+                assert all(secret not in response.text for secret in secrets)
+        assert all(secret not in json.dumps(rows(store, "SELECT * FROM events")) for secret in secrets)
+        with store.connect() as c:
+            assert set(secrets) <= set(store.project_secret_values(c, parent))
+    finally:
+        await coordinator.close()
+
+
+@pytest.mark.asyncio
 async def test_child_starts_independently_resumes_and_keeps_research_local(collaboration_app):
     app, client, parent, owner, assignee = collaboration_app
     store = app.state.store

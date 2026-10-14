@@ -673,6 +673,50 @@ async def test_token_prefix_is_redacted_from_output():
     assert "secret-token-abcdefghijklmnop" not in json.dumps(events)
 
 
+async def test_user_token_echo_is_redacted_at_every_stream_boundary(tmp_path):
+    secret = "synthetic-private-value-9Bz4"
+    for text in ("Value " + secret + " done", "Value token:" + secret + " done"):
+        for boundary in range(1, len(text)):
+            events = []
+
+            async def emit(kind, payload):
+                events.append((kind, payload))
+
+            run = agents._Run(
+                RunRequest("codex", tmp_path, "Use token:" + secret),
+                emit, {"SHUI_PROXY_URL": "http://127.0.0.1:7890"},
+            )
+            await run.output.append("answer", text[:boundary])
+            await run.output.append("answer", text[boundary:])
+            await run.output.finish()
+            await run.output.tool("tool", "running", text[:boundary], "tool-1")
+            await run.output.tool("tool", "completed", text[boundary:], "tool-1")
+            assert run.output.text in ("Value [redacted] done", "Value token:[redacted] done")
+            assert "".join(payload["content"] for kind, payload in events if kind == "tool") == run.output.text
+            assert secret not in "".join(str(payload) for _, payload in events)
+            assert run.error_text({"message": "Failed using " + secret}) == "Failed using [redacted]"
+
+
+async def test_unknown_token_prefix_split_is_buffered_before_redaction():
+    secret = "synthetic-unknown-token-7Yc9"
+    text = "Value token:" + secret + " done"
+    for boundary in range(1, len(text)):
+        events = []
+
+        async def emit(kind, payload):
+            events.append((kind, payload))
+
+        out = agents._Output(emit, agents._Redactor({}))
+        await out.append("answer", text[:boundary])
+        await out.append("answer", text[boundary:])
+        await out.finish()
+        await out.tool("tool", "running", text[:boundary], "tool-1")
+        await out.tool("tool", "completed", text[boundary:], "tool-1")
+        assert out.text == "Value token:[redacted] done"
+        assert "".join(payload["content"] for kind, payload in events if kind == "tool") == out.text
+        assert secret not in json.dumps(events)
+
+
 async def test_structured_tool_secret_is_redacted_before_json_encoding():
     events = []
 

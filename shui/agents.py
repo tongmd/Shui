@@ -16,7 +16,7 @@ import shutil
 import signal
 import uuid
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Awaitable, Callable
 from urllib.parse import urlsplit
@@ -30,6 +30,9 @@ class RunRequest:
     session_id: str | None = None
     model: str | None = None
     project_id: str = ""
+    # Earlier turns can still be recalled by the native session. Keep these
+    # values out of diagnostics while continuing to suppress their echoes.
+    secret_values: tuple[str, ...] = field(default=(), repr=False)
 
 
 @dataclass
@@ -136,16 +139,17 @@ def _positive_integer(name: str, default: int) -> int:
 
 
 class _Redactor:
-    """Do not forward known environment credentials or proxy passwords."""
+    """Do not forward environment credentials or user-supplied token values."""
 
-    def __init__(self, env: dict[str, str]):
+    def __init__(self, env: dict[str, str], secret_values=()):
         values = {
             v
             for k, v in env.items()
             if len(v) >= 6
             and re.search(r"TOKEN|SECRET|PASSWORD|API_KEY|AUTHORIZATION", k, re.I)
         }
-        proxy = urlsplit(env["SHUI_PROXY_URL"])
+        values.update(value for value in secret_values if value)
+        proxy = urlsplit(env.get("SHUI_PROXY_URL", ""))
         if proxy.password:
             values.add(proxy.password)
         if proxy.username or proxy.password:
@@ -172,10 +176,19 @@ class _Redactor:
                     hold = n
                     break
         sensitive_prefix = re.search(
-            r"(?is)(?:bearer\s+|basic\s+|token:)[A-Za-z0-9._~+/=-]{0,256}$", text
+            r"(?is)(?:bearer\s+|basic\s+|token:)[^\s`'\"<>]{0,4096}$", text
         )
         if sensitive_prefix:
             hold = max(hold, len(text) - sensitive_prefix.start())
+        lower = text.lower()
+        for marker in ("token:", "bearer ", "basic ", "sk-"):
+            for n in range(min(len(text), len(marker) - 1), hold, -1):
+                start = len(text) - n
+                if lower.endswith(marker[:n]) and (
+                    start == 0 or not (text[start - 1].isalnum() or text[start - 1] == "_")
+                ):
+                    hold = n
+                    break
         return (text[:-hold], text[-hold:]) if hold else (text, "")
 
 
@@ -192,7 +205,9 @@ class _Output:
         self.tool_pending: dict[str, str] = {}
 
     async def _publish(self, text: str, final: bool = False) -> None:
-        combined = self.redactor.clean(self.pending + text)
+        # Split the raw stream first. Redacting an unfinished token before
+        # buffering it loses the prefix needed to recognize the next delta.
+        combined = self.pending + text
         safe, self.pending = (
             (combined, "") if final else self.redactor.split_safe(combined)
         )
@@ -234,11 +249,12 @@ class _Output:
         else:
             content = _tool_display_text(content)
         pending_key = event_key or name
-        content = self.redactor.clean(self.tool_pending.pop(pending_key, "") + content)
+        content = self.tool_pending.pop(pending_key, "") + content
         if status == "running":
             content, pending = self.redactor.split_safe(content)
             if pending:
                 self.tool_pending[pending_key] = pending
+        content = self.redactor.clean(content)
         remaining = MAX_TOOL_CHARS - self.tool_chars
         if remaining <= 0:
             if not self.tool_truncated:
@@ -268,7 +284,7 @@ class _Output:
         if isinstance(value, dict):
             return json.dumps(
                 {
-                    str(k): self._safe_json(v)
+                    self.redactor.clean(str(k)): self._safe_json(v)
                     if isinstance(v, (str, dict, list, tuple))
                     else self.redactor.clean(str(v))
                     for k, v in value.items()
@@ -291,7 +307,8 @@ class _Output:
 class _Run:
     def __init__(self, request: RunRequest, emit: Emit, env: dict[str, str]):
         self.request, self.emit, self.env = request, emit, env
-        self.redactor = _Redactor(env)
+        prompt_tokens = re.findall(r"(?i)\btoken:([^\s`'\"<>]{1,4096})", request.prompt)
+        self.redactor = _Redactor(env, (*request.secret_values, *prompt_tokens))
         self.output = _Output(emit, self.redactor)
         self.session_id = request.session_id
         self.turn_id: str | None = None

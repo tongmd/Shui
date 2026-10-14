@@ -123,6 +123,7 @@ class Store:
             CREATE TABLE IF NOT EXISTS delegation_merge_attempts(delegation_id TEXT NOT NULL REFERENCES delegations(id) ON DELETE CASCADE,turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id),PRIMARY KEY(delegation_id,turn_id));
             CREATE TABLE IF NOT EXISTS collaboration_sessions(parent_project_id TEXT NOT NULL REFERENCES projects(id),assignee_id TEXT NOT NULL REFERENCES users(id),child_project_id TEXT NOT NULL UNIQUE REFERENCES projects(id),created_at TEXT NOT NULL,PRIMARY KEY(parent_project_id,assignee_id));
             CREATE TABLE IF NOT EXISTS delegation_requests(id TEXT PRIMARY KEY,delegation_id TEXT NOT NULL REFERENCES delegations(id) ON DELETE CASCADE,parent_project_id TEXT NOT NULL REFERENCES projects(id),child_project_id TEXT NOT NULL REFERENCES projects(id),parent_message_id TEXT NOT NULL UNIQUE REFERENCES messages(id),child_turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id),created_by TEXT NOT NULL REFERENCES users(id),assignee_id TEXT NOT NULL REFERENCES users(id),client_id TEXT NOT NULL,title TEXT NOT NULL,content TEXT NOT NULL,context TEXT NOT NULL DEFAULT '',attachment_ids TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL,UNIQUE(parent_project_id,client_id,assignee_id));
+            CREATE TABLE IF NOT EXISTS delegation_request_secrets(request_id TEXT NOT NULL REFERENCES delegation_requests(id) ON DELETE CASCADE,field TEXT NOT NULL CHECK(field IN ('title','context')),position INTEGER NOT NULL,value TEXT NOT NULL,PRIMARY KEY(request_id,field,position));
             CREATE TABLE IF NOT EXISTS delegation_turns(delegation_id TEXT NOT NULL REFERENCES delegations(id) ON DELETE CASCADE,turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id),request_id TEXT REFERENCES delegation_requests(id) ON DELETE SET NULL,PRIMARY KEY(delegation_id,turn_id));
             """)
             # Preserve unrelated legacy data problems; only reject violations introduced here.
@@ -456,7 +457,6 @@ class Store:
             )
 
     def message_content(self, c, row):
-        content = row["content"]
         secrets = [
             secret["value"]
             for secret in c.execute(
@@ -464,9 +464,48 @@ class Store:
                 (row["id"],),
             )
         ]
-        for secret in secrets:
-            content = content.replace(TOKEN_REDACTION, secret, 1)
-        return content
+        return self.restore_message_tokens(row["content"], secrets)
+
+    @staticmethod
+    def restore_message_tokens(content, secrets):
+        values = iter(secrets)
+        return re.sub(re.escape(TOKEN_REDACTION), lambda match: next(values, match[0]), content)
+
+    def delegation_prompt_brief(self, c, request):
+        """Restore the private brief for execution only, never API serialization."""
+        brief = dict(request)
+        for field in ("title", "context"):
+            values = [row[0] for row in c.execute(
+                "SELECT value FROM delegation_request_secrets WHERE request_id=? AND field=? ORDER BY position",
+                (request["id"], field),
+            )]
+            brief[field] = self.restore_message_tokens(brief[field], values)
+        message = c.execute(
+            "SELECT m.* FROM messages m JOIN turns t ON t.user_message_id=m.id WHERE t.id=?",
+            (request["child_turn_id"],),
+        ).fetchone()
+        if message:
+            brief["content"] = self.message_content(c, message)
+        return brief
+
+    def project_secret_values(self, c, project_id):
+        """Protect echoes of credentials remembered across native session turns."""
+        values = [row[0] for row in c.execute(
+            "SELECT s.value FROM message_secrets s JOIN messages m ON m.id=s.message_id "
+            "WHERE m.project_id=?", (project_id,),
+        )]
+        values.extend(row[0] for row in c.execute(
+            "SELECT s.value FROM delegation_request_secrets s JOIN delegation_requests r ON r.id=s.request_id "
+            "WHERE r.child_project_id=? OR r.parent_project_id=?", (project_id, project_id),
+        ))
+        # The parent only gets a bounded merge summary. Suppress credentials
+        # assigned in a child if that summary happens to echo one.
+        values.extend(row[0] for row in c.execute(
+            "SELECT s.value FROM message_secrets s JOIN turns t ON t.user_message_id=s.message_id "
+            "JOIN delegation_requests r ON r.child_turn_id=t.id WHERE r.parent_project_id=?",
+            (project_id,),
+        ))
+        return tuple({match[1] for value in values if (match := TOKEN_PATTERN.fullmatch(value))})
 
     def file(self, row):
         return {

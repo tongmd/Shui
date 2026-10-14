@@ -1042,8 +1042,8 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
         title = textfield(data, "title", 120) or content.splitlines()[0][:120]
         context = textfield(data, "context", 8000)
         visible_content, _content_secrets = store.redact_message_tokens(content)
-        visible_title, _title_secrets = store.redact_message_tokens(title)
-        visible_context, _context_secrets = store.redact_message_tokens(context)
+        visible_title, title_secrets = store.redact_message_tokens(title)
+        visible_context, context_secrets = store.redact_message_tokens(context)
         client_id = delegation_request_id(data)
         assignees = data.get("assignee_ids")
         attachments = data.get("attachment_ids", [])
@@ -1123,6 +1123,10 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                     c.execute("INSERT INTO delegation_requests VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                         rid, did, pid, child, mid, queued["turn"]["id"], user["id"], assignee, client_id, visible_title, visible_content, visible_context, json.dumps(attachments), at,
                     ))
+                    for field, values in (("title", title_secrets), ("context", context_secrets)):
+                        c.executemany("INSERT INTO delegation_request_secrets VALUES(?,?,?,?)", (
+                            (rid, field, position, value) for position, value in enumerate(values)
+                        ))
                     c.execute("UPDATE delegation_turns SET request_id=? WHERE turn_id=?", (rid, queued["turn"]["id"]))
                     store.publish_enqueued_turn(c, queued["turn"])
                     task = delegation_row(c, pid, did, user)

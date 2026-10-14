@@ -142,6 +142,49 @@ async def test_worker_receives_token_while_history_stays_redacted(queued_app):
 
 
 @pytest.mark.asyncio
+async def test_token_echoes_stay_private_across_turns_and_failure(queued_app):
+    app, client, pid = queued_app
+    secret = "synthetic-private-token-K8zQ"
+    store = app.state.store
+    for index, content in enumerate(("Use token:" + secret, "Continue using the credential")):
+        response = client.post(f"/api/projects/{pid}/messages", json={
+            "content": content, "client_id": f"secret-turn-{index}",
+        })
+        assert response.status_code == 201
+    seen = []
+
+    async def runner(request, emit, cancel):
+        seen.append(request)
+        assert secret in request.secret_values
+        await emit("session", {"session_id": "private-session"})
+        await emit("delta", {"text": "Echo " + secret[:10]})
+        await emit("delta", {"text": secret[10:] + " done"})
+        await emit("tool", {"name": "Tool " + secret, "status": "running", "content": secret[:10]})
+        await emit("tool", {"name": "Tool " + secret, "status": "complete", "content": secret[10:]})
+        await emit("status", {"text": "Using " + secret})
+        if len(seen) == 2:
+            assert secret not in request.prompt
+            raise RuntimeError("Provider rejected " + secret)
+        return RunResult("private-session", "Final " + secret)
+
+    coordinator = Coordinator(store, runner)
+    await coordinator.start()
+    try:
+        await finish(coordinator)
+        assert len(seen) == 2
+        history = client.get(f"/api/projects/{pid}/messages").json()
+        assert secret not in json.dumps(history)
+        assert secret not in json.dumps(rows(store, "SELECT * FROM events"))
+        assert secret not in json.dumps(rows(store, "SELECT * FROM turns"))
+        answers = rows(store, "SELECT content,error FROM messages WHERE role='assistant' ORDER BY created_at,id")
+        assert answers[0]["content"] == "Final [redacted]"
+        assert answers[1]["content"] == "Echo [redacted] done"
+        assert answers[1]["error"] == "Provider rejected [redacted]"
+    finally:
+        await coordinator.close()
+
+
+@pytest.mark.asyncio
 async def test_distinct_projects_execute_concurrently(queued_app):
     app, client, pid = queued_app
     second_pid = client.post("/api/projects", json={"name": "Second paper"}).json()[
