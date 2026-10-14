@@ -44,14 +44,25 @@ class AgentError(RuntimeError):
 
 
 Emit = Callable[[str, dict], Awaitable[None]]
-MAX_FRAME_BYTES = 2 * 1024 * 1024
+MAX_FRAME_BYTES = 32 * 1024 * 1024
 MAX_TEXT_CHARS = 1024 * 1024
 MAX_TOOL_CHARS = 2 * 1024 * 1024
 MAX_TOOL_EVENT_CHARS = 16 * 1024
 MAX_EVENTS = 100_000
 MAX_ITEMS = 4096
 STOP_GRACE_SECONDS = 1.0
+WAIT_STATUS_SECONDS = 60.0
 _ACTIVE: set[tuple[str, str]] = set()
+_IMAGE_DATA_URI = re.compile(
+    r"data:(image/[a-zA-Z0-9.+-]+);base64,[A-Za-z0-9+/]+={0,2}", re.I
+)
+
+
+def _tool_display_text(value: str) -> str:
+    # Inline image bytes are native model input, not useful browser tool text.
+    return _IMAGE_DATA_URI.sub(
+        lambda match: f"[inline {match[1]} data omitted]", value
+    )
 
 
 def _binary(provider: str) -> str | None:
@@ -109,6 +120,19 @@ def _seconds(name: str, default: float) -> float:
         raise AgentError(
             f"{name} must be a positive number no greater than 86400."
         ) from exc
+
+
+def _positive_integer(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default)).strip()
+    try:
+        if not re.fullmatch(r"[0-9]+", raw):
+            raise ValueError
+        value = int(raw)
+        if value <= 0:
+            raise ValueError
+        return value
+    except ValueError as exc:
+        raise AgentError(f"{name} must be a positive integer.") from exc
 
 
 class _Redactor:
@@ -206,6 +230,8 @@ class _Output:
     ) -> None:
         if not isinstance(content, str):
             content = self._safe_json(content)
+        else:
+            content = _tool_display_text(content)
         pending_key = event_key or name
         content = self.redactor.clean(self.tool_pending.pop(pending_key, "") + content)
         if status == "running":
@@ -237,12 +263,12 @@ class _Output:
 
     def _safe_json(self, value: object) -> str:
         if isinstance(value, str):
-            return self.redactor.clean(value)
+            return self.redactor.clean(_tool_display_text(value))
         if isinstance(value, dict):
             return json.dumps(
                 {
                     str(k): self._safe_json(v)
-                    if isinstance(v, (dict, list, tuple))
+                    if isinstance(v, (str, dict, list, tuple))
                     else self.redactor.clean(str(v))
                     for k, v in value.items()
                 },
@@ -252,7 +278,7 @@ class _Output:
             return json.dumps(
                 [
                     self._safe_json(v)
-                    if isinstance(v, (dict, list, tuple))
+                    if isinstance(v, (str, dict, list, tuple))
                     else self.redactor.clean(str(v))
                     for v in value
                 ],
@@ -278,7 +304,7 @@ class _Run:
         self.completed_turn_id: str | None = None
         self.tool_names: dict[str, str] = {}
         self.streamed_message_blocks: set[tuple[str, str]] = set()
-        self.idle_timeout = _seconds("SHUI_AGENT_IDLE_TIMEOUT_SECONDS", 600)
+        self.idle_timeout = _seconds("SHUI_AGENT_IDLE_TIMEOUT_SECONDS", 1800)
 
     def lock(self, key: tuple[str, str]) -> None:
         if any(k == key for k, _ in self.locks):
@@ -359,18 +385,45 @@ class _Run:
     async def read(self) -> dict | None:
         assert self.proc and self.proc.stdout
         while True:
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            deadline = started + self.idle_timeout
+            pending = asyncio.create_task(self.proc.stdout.readline())
             try:
-                raw = await asyncio.wait_for(
-                    self.proc.stdout.readline(), self.idle_timeout
-                )
+                async with asyncio.timeout_at(deadline):
+                    while True:
+                        done, _ = await asyncio.wait(
+                            {pending}, timeout=WAIT_STATUS_SECONDS
+                        )
+                        if pending in done:
+                            raw = await pending
+                            break
+                        await self.emit(
+                            "status",
+                            {
+                                "text": "Waiting for native agent output "
+                                f"({loop.time() - started:.0f}s without protocol events)."
+                            },
+                        )
             except TimeoutError as exc:
+                elapsed = loop.time() - started
                 raise AgentError(
-                    "Native agent stopped producing protocol events before the idle timeout."
+                    f"Native agent idle timeout after {elapsed:.1f} seconds "
+                    "without protocol events; the native session and "
+                    "persisted history were retained."
                 ) from exc
             except (ValueError, asyncio.LimitOverrunError) as exc:
                 raise AgentError(
                     "Native agent emitted an oversized protocol frame."
                 ) from exc
+            finally:
+                # A heartbeat must not restart the read or the real idle deadline.
+                # Cancellation/timeout must not leave a competing stdout reader.
+                pending.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await pending
+            if len(raw) > MAX_FRAME_BYTES:
+                raise AgentError("Native agent emitted an oversized protocol frame.")
             if not raw:
                 return None
             self.events += 1
@@ -424,6 +477,15 @@ class _Run:
                     os.killpg(self.proc.pid, signal.SIGKILL)
                 with suppress(TimeoutError):
                     await asyncio.wait_for(self.proc.wait(), 2)
+            if self.proc and self.proc.stdout:
+                # An oversized frame can leave stdout paused with buffered bytes.
+                # Drain after stopping the child so its pipe transport reaches EOF.
+                async def discard_stdout() -> None:
+                    while await self.proc.stdout.read(8192):
+                        pass
+
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(discard_stdout(), 2)
         finally:
             if self.stderr_task:
                 self.stderr_task.cancel()
@@ -495,6 +557,14 @@ async def _codex_event(run: _Run, data: dict) -> None:
                 )
                 if k in item
             }
+            result = content.get("result")
+            if (
+                (kind == "imageGeneration" or item.get("kind") == "image_gen.generation")
+                and isinstance(result, str)
+                and result.startswith(("iVBORw0KGgo", "/9j/", "R0lGOD", "UklGR"))
+                and re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", result)
+            ):
+                content["result"] = "[generated image data omitted]"
             await run.output.tool(
                 name,
                 "running"
@@ -569,6 +639,9 @@ async def _rpc(run: _Run, method: str, params: dict) -> dict:
 
 async def _codex(run: _Run, binary: str) -> None:
     model = run.request.model or os.environ.get("SHUI_CODEX_MODEL") or "gpt-5.6-sol"
+    auto_compact_token_limit = _positive_integer(
+        "SHUI_CODEX_AUTO_COMPACT_TOKEN_LIMIT", 200000
+    )
     await run.spawn(
         [
             binary,
@@ -592,6 +665,9 @@ async def _codex(run: _Run, binary: str) -> None:
             "cwd": str(run.request.workspace.resolve()),
             "approvalPolicy": "never",
             "sandbox": "danger-full-access",
+            # Thread binding reloads config; process-level -c overrides alone
+            # do not reliably reach the resumed thread's compaction policy.
+            "config": {"model_auto_compact_token_limit": auto_compact_token_limit},
         }
         params["model"] = model
         if run.session_id:

@@ -12,6 +12,13 @@ and an ordered task queue. Each message records its author. Every collaborator
 continues the project's existing native agent conversation. Projects run in
 parallel; turns within a project run in order.
 
+Paste text or screenshots into the message box with **Ctrl+V** (**Command+V**
+on macOS). Pasted images upload as attachments; accompanying text stays in the
+message box, and nothing is sent until you press Send. Use a message's **Copy**
+button to copy its full text. Image previews also offer **Copy image** and
+**Ctrl+C / Command+C** when no text is selected. Normal text selection and
+copy/paste shortcuts continue to work.
+
 Each project also has a **Research** panel. It lists experiments, the claim and
 validation target for each one, current results, and paper figures. PNG, JPEG,
 WebP, GIF, SVG, and PDF figures produced in the project workspace appear as
@@ -106,6 +113,7 @@ documents the settings; Shui does not automatically load `.env` files.
 | `SHUI_PUBLIC_ORIGIN` | `http://127.0.0.1:18940` | Exact browser origin, including scheme and port |
 | `SHUI_PROXY_URL` | `http://127.0.0.1:7890` with `shui serve` | Required proxy for agent child processes |
 | `SHUI_CODEX_MODEL` | `gpt-5.6-sol` | Default Codex model; project settings take precedence |
+| `SHUI_CODEX_AUTO_COMPACT_TOKEN_LIMIT` | `200000` | Positive integer native compaction threshold, passed explicitly on thread start/resume |
 | `SHUI_CODEX_BIN` | `codex` | Executable name or absolute path |
 | `SHUI_CLAUDE_BIN` | `claude` | Executable name or absolute path |
 | `SHUI_AGENT_TIMEOUT_SECONDS` | `3600` | Maximum time for one agent turn, up to 86400 |

@@ -29,8 +29,14 @@ SHUI_DATA_DIR=/var/lib/shui
 SHUI_PUBLIC_ORIGIN=https://shui.example.org
 SHUI_PROXY_URL=http://127.0.0.1:7890
 SHUI_CODEX_BIN=/home/research/.local/bin/codex
+SHUI_CODEX_AUTO_COMPACT_TOKEN_LIMIT=200000
 SHUI_CLAUDE_BIN=/home/research/.local/bin/claude
 ```
+
+`SHUI_CODEX_AUTO_COMPACT_TOKEN_LIMIT` must be a positive integer. Shui passes it
+to both new and resumed Codex threads; a wrapper's process-level configuration
+alone does not reliably set a resumed thread's compaction threshold. The default
+is `200000`, and invalid values fail before the native process is launched.
 
 ```sh
 sudo systemctl daemon-reload

@@ -420,6 +420,64 @@ def test_workspace_traversal_and_symlinks_are_rejected(workspace, tmp_path):
     assert owner.get(endpoint, params={"path": "paper.tex"}).content == b"Paper"
 
 
+def test_native_file_links_and_head_downloads(workspace):
+    app, clients, _, pid = workspace
+    root = app.state.store.workspace(pid)
+    folder = root / "deliverables"
+    folder.mkdir()
+    path = folder / "研究 draft (2).pdf"
+    payload = b"%PDF-1.7\nshared deliverable\n"
+    path.write_bytes(payload)
+    endpoint = f"/api/projects/{pid}/artifact"
+    links = [
+        "deliverables/研究 draft (2).pdf",
+        str(path),
+        path.as_uri(),
+        "sandbox:/mnt/data/deliverables/研究 draft (2).pdf",
+        "sandbox:" + str(path),
+    ]
+    for link in links:
+        response = clients["viewer"].get(endpoint, params={"path": link})
+        assert response.status_code == 200, link
+        assert response.content == payload
+        assert response.headers["content-disposition"].startswith("attachment;")
+        head = clients["viewer"].head(endpoint, params={"path": link})
+        assert head.status_code == 200
+        assert head.content == b""
+        assert int(head.headers["content-length"]) == len(payload)
+    assert clients["outside"].head(endpoint, params={"path": str(path)}).status_code == 404
+    with TestClient(app) as anonymous:
+        assert anonymous.head(endpoint, params={"path": str(path)}).status_code == 401
+    uploaded = clients["owner"].post(
+        f"/api/projects/{pid}/files", files={"file": ("result.txt", b"result")}
+    ).json()
+    head = clients["viewer"].head(uploaded["download_url"])
+    assert head.status_code == 200 and head.content == b""
+    assert head.headers["content-length"] == "6"
+
+
+def test_native_file_links_keep_project_boundary(workspace, tmp_path):
+    app, clients, _, pid = workspace
+    root = app.state.store.workspace(pid)
+    private = tmp_path / "private.txt"
+    private.write_text("private")
+    (root / "escape").symlink_to(tmp_path, target_is_directory=True)
+    (root / ".env").write_text("secret")
+    endpoint = f"/api/projects/{pid}/artifact"
+    invalid = [
+        str(private), private.as_uri(), "file://remote/private.txt",
+        "sandbox:/mnt/data/../private.txt", str(root / ".." / "private.txt"),
+        str(root / ".env"), (root / ".env").as_uri(),
+        "javascript:alert(1)", "file://[bad/path", "file:///tmp/%00",
+    ]
+    for link in invalid:
+        for method in ("get", "head"):
+            response = getattr(clients["owner"], method)(endpoint, params={"path": link})
+            assert response.status_code == 400, link
+    for link in [str(root / "escape/private.txt"), (root / "escape/private.txt").as_uri()]:
+        assert clients["owner"].get(endpoint, params={"path": link}).status_code == 403
+
+
 def test_upload_directory_symlink_cannot_write_outside_project(workspace, tmp_path):
     app, clients, _, pid = workspace
     uploads = app.state.store.workspace(pid) / "uploads"

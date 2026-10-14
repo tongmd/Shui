@@ -16,9 +16,9 @@ JSON API under `/api`; all errors `{detail: string}`. Auth cookies are HttpOnly;
 - `GET /api/projects/{id}/events?after=cursor` SSE, cookie auth; each event has SSE id and JSON `{id,type,project_id,payload,created_at}`. Durable replay supports `Last-Event-ID`; periodic keepalive. Types include `message.created`, `message.updated`, `turn.updated`, `agent.delta`, `agent.tool`, `project.updated`, `file.created`, `artifact.changed`, `research.updated`, `member.updated`, `presence`. Payload contains affected `message`/`turn`/`project` objects; agent.delta `{message_id,delta}`, agent.tool `{turn_id,name,status,content}`.
 - `GET /api/projects/{id}/files` -> `{files:[File]}`.
 - `POST /api/projects/{id}/files` multipart field `file` -> File. Store bytes in project workspace `uploads/{file_id}/{safe_name}`; max 50MiB, sha256 recorded.
-- `GET /api/projects/{id}/files/{file_id}` authenticated download attachment.
+- `GET|HEAD /api/projects/{id}/files/{file_id}` authenticated download attachment; HEAD checks availability and headers without downloading the body.
 - `GET /api/projects/{id}/workspace?path=` -> `{path,entries:[{name,path,type:'file'|'directory',size}]}` read-only artifact browser. No traversal/symlinks/outside root or .env/auth/git metadata.
-- `GET /api/projects/{id}/artifact?path=` -> authenticated download; safe PDF/image/SVG artifacts can preview via browser download URL `&inline=1`.
+- `GET|HEAD /api/projects/{id}/artifact?path=` -> authenticated download; safe PDF/image/SVG artifacts can preview via browser download URL `&inline=1`. Paths may be workspace-relative or absolute inside this project. Native `file:///` links are accepted only inside the same workspace; `sandbox:/mnt/data/` maps to the workspace root. Traversal, hidden files, symlinks and paths outside the project remain blocked. The message renderer converts native file links to this endpoint and checks HEAD before starting a browser download. Deliverables made outside the workspace must be copied into it before sharing.
 - `GET /api/projects/{id}/members` -> `{members:[Member]}`.
 - `POST /api/projects/{id}/members {username,role:'editor'|'viewer'}` owner only.
 - `DELETE /api/projects/{id}/members/{user_id}` owner only.

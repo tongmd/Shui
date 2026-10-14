@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -81,6 +82,13 @@ if "app-server" in sys.argv:
             if mode == "terminal_error":
                 out({"method":"error", "params":dict(p,willRetry=False,error={"message":"failed"})})
                 hang()
+            if mode in ["large_image", "large_image_extension"]:
+                image = {"id":"image1", "type":"imageGeneration", "status":"completed",
+                         "result":"iVBORw0KGgo" + "A" * (3 * 1024 * 1024),
+                         "savedPath":"/workspace/generated-image.png"}
+                if mode == "large_image_extension":
+                    image.update(type="Extension", kind="image_gen.generation")
+                out({"method":"item/completed", "params":dict(p,item=image)})
             out({"method":"item/agentMessage/delta","params":dict(p,threadId="other-thread",itemId="alien",delta="ignore me")})
             out({"method":"item/started","params":dict(p,item={"id":"cmd1","type":"commandExecution","command":"echo test"})})
             out({"method":"item/commandExecution/outputDelta","params":dict(p,itemId="cmd1",delta="tool output")})
@@ -166,6 +174,7 @@ def fake_cli(tmp_path, monkeypatch):
     monkeypatch.setenv("SHUI_LOCK_DIR", str(tmp_path / "locks"))
     monkeypatch.setenv("SHUI_AGENT_TIMEOUT_SECONDS", "5")
     monkeypatch.setenv("SHUI_AGENT_IDLE_TIMEOUT_SECONDS", "3")
+    monkeypatch.delenv("SHUI_CODEX_AUTO_COMPACT_TOKEN_LIMIT", raising=False)
     monkeypatch.setattr(agents, "STOP_GRACE_SECONDS", 0.1)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -196,8 +205,12 @@ async def collect_run(
     return result, events
 
 
-async def test_codex_handshake_stream_and_resume(fake_cli):
+@pytest.mark.parametrize("compact_limit", [None, "120000", "250000"])
+async def test_codex_handshake_stream_and_resume(fake_cli, monkeypatch, compact_limit):
     workspace, capture = fake_cli
+    if compact_limit is not None:
+        monkeypatch.setenv("SHUI_CODEX_AUTO_COMPACT_TOKEN_LIMIT", compact_limit)
+    expected_config = {"model_auto_compact_token_limit": int(compact_limit or 200000)}
 
     async def before_generation(kind, payload):
         if kind == "session":
@@ -222,13 +235,30 @@ async def test_codex_handshake_stream_and_resume(fake_cli):
     assert turn["sandboxPolicy"] == {"type": "dangerFullAccess"}
     assert start["ephemeral"] is False
     assert start["model"] == turn["model"] == "chosen-model"
+    assert start["config"] == expected_config
     resumed, _ = await collect_run(workspace, session_id=result.session_id)
     assert resumed.session_id == result.session_id
     calls = [r for r in records(capture) if "method" in r]
     assert [r["method"] for r in calls].count("thread/start") == 1
     resume = next(r["params"] for r in calls if r["method"] == "thread/resume")
     assert resume["threadId"] == result.session_id and resume["excludeTurns"] is True
+    assert resume["config"] == expected_config
     assert not any("fork" in r["method"] for r in calls)
+
+
+@pytest.mark.parametrize("session_id", [None, "existing-thread"])
+@pytest.mark.parametrize("compact_limit", ["", "0", "-1", "1.5", "nan", "1e5", "invalid"])
+async def test_codex_invalid_compaction_limit_fails_before_launch(
+    fake_cli, monkeypatch, session_id, compact_limit
+):
+    workspace, capture = fake_cli
+    monkeypatch.setenv("SHUI_CODEX_AUTO_COMPACT_TOKEN_LIMIT", compact_limit)
+    with pytest.raises(
+        AgentError, match="SHUI_CODEX_AUTO_COMPACT_TOKEN_LIMIT must be a positive integer"
+    ):
+        await collect_run(workspace, session_id=session_id)
+    assert not capture.exists()
+    assert not agents._ACTIVE
 
 
 async def test_claude_stream_same_uuid_resume_and_prelaunch_bind(fake_cli):
@@ -345,8 +375,32 @@ async def test_codex_interleaved_notifications(fake_cli, monkeypatch, mode):
 async def test_codex_invalid_and_active_protocol(fake_cli, monkeypatch, mode):
     workspace, _ = fake_cli
     monkeypatch.setenv("SHUI_FAKE_MODE", mode)
-    with pytest.raises(AgentError):
+    if mode == "oversized":
+        monkeypatch.setattr(agents, "MAX_FRAME_BYTES", 256 * 1024)
+        original_close = agents._Run.close
+
+        async def close_and_check_pipe(run):
+            await original_close(run)
+            assert run.proc.stdout.at_eof()
+
+        monkeypatch.setattr(agents._Run, "close", close_and_check_pipe)
+    with pytest.raises(AgentError, match="oversized" if mode == "oversized" else None):
         await collect_run(workspace)
+
+
+@pytest.mark.parametrize("mode", ["large_image", "large_image_extension"])
+async def test_large_image_frame_finishes_with_bounded_browser_output(
+    fake_cli, monkeypatch, mode
+):
+    workspace, _ = fake_cli
+    monkeypatch.setenv("SHUI_FAKE_MODE", mode)
+    result, events = await collect_run(workspace)
+    assert result.status == "complete" and result.text == "Hello world"
+    image_event = next(p for k, p in events if k == "tool" and "savedPath" in p["content"])
+    assert "/workspace/generated-image.png" in image_event["content"]
+    assert "generated image data omitted" in image_event["content"]
+    assert "iVBORw0KGgo" not in image_event["content"]
+    assert len(image_event["content"]) < agents.MAX_TOOL_EVENT_CHARS
 
 
 @pytest.mark.parametrize("mode", ["denied", "bad_exit"])
@@ -360,13 +414,12 @@ async def test_claude_terminal_failure(fake_cli, monkeypatch, mode):
 def alive(pid):
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+        # The process can be reaped between kill(0) and reading procfs.
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except (ProcessLookupError, FileNotFoundError):
         return False
     # Orphaned killed grandchildren can briefly be zombies on Linux containers.
-    stat = Path(f"/proc/{pid}/stat")
-    if stat.exists() and stat.read_text().split()[2] == "Z":
-        return False
-    return True
+    return stat.split()[2] != "Z"
 
 
 async def wait_for_record(capture, key):
@@ -422,10 +475,102 @@ async def test_timeout_stops_cli(fake_cli, monkeypatch, setting, mode):
     workspace, capture = fake_cli
     monkeypatch.setenv("SHUI_FAKE_MODE", mode)
     monkeypatch.setenv(setting, "1")
+    monkeypatch.setattr(agents, "WAIT_STATUS_SECONDS", 0.03)
     with pytest.raises(AgentError, match="time"):
         await collect_run(workspace)
     pid = next(r["pid"] for r in records(capture) if "pid" in r)
     assert not alive(pid)
+
+
+class TrackingReader(asyncio.StreamReader):
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+        self.finished = asyncio.Event()
+
+    async def readline(self):
+        self.calls += 1
+        try:
+            return await super().readline()
+        finally:
+            self.finished.set()
+
+
+def reader_run(workspace, emit):
+    run = agents._Run(RunRequest("codex", workspace, "test"), emit, agents._environment())
+    reader = TrackingReader()
+    run.proc = SimpleNamespace(stdout=reader)
+    return run, reader
+
+
+async def test_wait_status_preserves_pending_read(fake_cli, monkeypatch):
+    workspace, _ = fake_cli
+    monkeypatch.setattr(agents, "WAIT_STATUS_SECONDS", 0.01)
+    events = []
+
+    async def emit(kind, payload):
+        events.append((kind, payload))
+        if len(events) == 2:
+            reader.feed_data(b'{"ok": true}\n')
+
+    run, reader = reader_run(workspace, emit)
+    assert await run.read() == {"ok": True}
+    assert reader.calls == 1 and reader.finished.is_set()
+    assert all(k == "status" and "Waiting for native agent output" in p["text"] for k, p in events)
+
+
+@pytest.mark.parametrize("slow_emit", [False, True])
+async def test_wait_status_never_extends_configured_idle_timeout(
+    fake_cli, monkeypatch, slow_emit
+):
+    workspace, _ = fake_cli
+    monkeypatch.setattr(agents, "WAIT_STATUS_SECONDS", 0.01)
+    monkeypatch.setenv("SHUI_AGENT_IDLE_TIMEOUT_SECONDS", "0.1")
+    events = []
+
+    async def emit(kind, payload):
+        events.append((kind, payload))
+        if slow_emit:
+            await asyncio.Event().wait()
+
+    run, reader = reader_run(workspace, emit)
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(AgentError, match="idle timeout after 0.1 seconds.*session.*retained"):
+        await run.read()
+    elapsed = asyncio.get_running_loop().time() - started
+    assert 0.08 <= elapsed < 0.5
+    assert events
+    assert reader.calls == 1 and reader.finished.is_set()
+
+
+async def test_cancel_during_wait_status_leaves_no_pending_reader(fake_cli, monkeypatch):
+    workspace, _ = fake_cli
+    monkeypatch.setattr(agents, "WAIT_STATUS_SECONDS", 0.01)
+    waiting = asyncio.Event()
+
+    async def emit(kind, payload):
+        waiting.set()
+
+    run, reader = reader_run(workspace, emit)
+    task = asyncio.create_task(run.read())
+    await asyncio.wait_for(waiting.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert reader.finished.is_set()
+    reader.feed_data(b'{"ok": true}\n')
+    assert await run.read() == {"ok": True}
+
+
+async def test_default_idle_timeout_allows_long_native_prefill(fake_cli, monkeypatch):
+    workspace, _ = fake_cli
+    monkeypatch.delenv("SHUI_AGENT_IDLE_TIMEOUT_SECONDS")
+
+    async def emit(kind, payload):
+        pass
+
+    run, _ = reader_run(workspace, emit)
+    assert run.idle_timeout == 1800
 
 
 async def test_duplicate_native_session_is_rejected(fake_cli, monkeypatch):
@@ -512,6 +657,26 @@ async def test_tool_output_is_bounded():
     await out.tool("Bash", "running", "x" * (agents.MAX_TOOL_EVENT_CHARS * 2))
     assert len(events[0][1]["content"]) < agents.MAX_TOOL_EVENT_CHARS + 100
     assert "truncated" in events[0][1]["content"]
+
+
+async def test_inline_image_display_omits_bytes_and_preserves_results_and_paths():
+    events = []
+
+    async def emit(kind, payload):
+        events.append((kind, payload))
+
+    out = agents._Output(
+        emit, agents._Redactor({"SHUI_PROXY_URL": "http://127.0.0.1:7890"})
+    )
+    data = "data:image/png;base64,iVBORw0KGgo" + "A" * (agents.MAX_TOOL_EVENT_CHARS * 2)
+    await out.tool("image", "completed", {"image": {"url": data}, "result": "done", "path": "/tmp/image.png"})
+    await out.tool("image", "completed", f"{data}\nSaved /tmp/another.png")
+    assert out.tool_chars < 1000
+    assert "inline image/png data omitted" in events[0][1]["content"]
+    assert '"result": "done"' in events[0][1]["content"]
+    assert "/tmp/image.png" in events[0][1]["content"]
+    assert "Saved /tmp/another.png" in events[1][1]["content"]
+    assert "iVBORw0KGgo" not in json.dumps(events)
 
 
 async def test_claude_snapshot_without_api_index_after_thinking(fake_cli, monkeypatch):

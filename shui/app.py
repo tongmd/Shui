@@ -16,7 +16,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -157,6 +157,35 @@ def project_link(value, kind):
             else "https://www.overleaf.com/project/PROJECT_ID"
         )
         raise HTTPException(400, f"Use a {kind} project link such as {example}")
+
+
+def artifact_link_path(root: Path, value: str) -> str:
+    """Map native-agent file links into this project's existing path boundary."""
+    if len(value) > 4096 or "\x00" in value:
+        raise HTTPException(400, "Invalid project path")
+    if value.startswith("sandbox:"):
+        value = value.removeprefix("sandbox:")
+        if value.startswith("/mnt/data/"):
+            value = value.removeprefix("/mnt/data/")
+    elif value.startswith("file:"):
+        try:
+            parts = urlsplit(value)
+        except ValueError:
+            raise HTTPException(400, "Invalid project path") from None
+        if parts.netloc not in ("", "localhost") or parts.query or parts.fragment:
+            raise HTTPException(400, "Invalid project path")
+        value = unquote(parts.path)
+    elif re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value):
+        raise HTTPException(400, "Invalid project path")
+    if "\x00" in value:
+        raise HTTPException(400, "Invalid project path")
+    path = Path(value)
+    if path.is_absolute():
+        try:
+            path = path.relative_to(root)
+        except ValueError:
+            raise HTTPException(400, "Path is outside this project") from None
+    return str(path)
 
 
 def safe_artifact(root: Path, relative: str, directory=False):
@@ -1515,7 +1544,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             },
         )
 
-    @app.get("/api/projects/{pid}/files/{fid}")
+    @app.api_route("/api/projects/{pid}/files/{fid}", methods=["GET", "HEAD"])
     async def file_download(pid: str, fid: str, request: Request, inline: int = 0):
         access(request, pid)
         with store.connect() as c:
@@ -1553,10 +1582,11 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             "entries": entries,
         }
 
-    @app.get("/api/projects/{pid}/artifact")
+    @app.api_route("/api/projects/{pid}/artifact", methods=["GET", "HEAD"])
     async def artifact(pid: str, request: Request, path: str, inline: int = 0):
         access(request, pid)
-        p = safe_artifact(store.workspace(pid), path)
+        root = store.workspace(pid)
+        p = safe_artifact(root, artifact_link_path(root, path))
         return download(p, p.name, inline)
 
     @app.get("/api/projects/{pid}/members")

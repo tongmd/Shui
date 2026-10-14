@@ -28,6 +28,27 @@
   const uuid = () => crypto.randomUUID ? crypto.randomUUID() : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = crypto.getRandomValues(new Uint8Array(1))[0] & 15; return (c === 'x' ? r : (r & 3) | 8).toString(16); });
   function stored(key, value) { try { if (value === undefined) return localStorage.getItem(key); if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value); } catch (_) {} return null; }
   function toast(message, kind = '') { const n = el('div', `toast ${kind}`, message); $('toasts').append(n); setTimeout(() => n.remove(), kind === 'error' ? 6500 : 4000); }
+  function fallbackCopyText(text) {
+    const active = document.activeElement; const selection = window.getSelection();
+    const ranges = selection ? Array.from({ length: selection.rangeCount }, (_, i) => selection.getRangeAt(i).cloneRange()) : [];
+    const inputSelection = active && typeof active.selectionStart === 'number' ? [active.selectionStart, active.selectionEnd, active.selectionDirection] : null;
+    const field = el('textarea'); field.value = text; field.readOnly = true; field.tabIndex = -1;
+    field.style.cssText = 'position:fixed;left:-9999px;top:0;font-size:16px';
+    (document.querySelector('dialog[open]') || document.body).append(field);
+    try { field.focus({ preventScroll: true }); field.select(); return document.execCommand('copy'); }
+    finally {
+      field.remove();
+      if (active?.isConnected) { active.focus({ preventScroll: true }); if (inputSelection) active.setSelectionRange(...inputSelection); }
+      if (selection) { selection.removeAllRanges(); ranges.forEach(range => { if (range.commonAncestorContainer.isConnected) selection.addRange(range); }); }
+    }
+  }
+  async function copyMessageText(text) {
+    try {
+      try { if (!navigator.clipboard?.writeText) throw new Error('Clipboard unavailable'); await navigator.clipboard.writeText(text); }
+      catch (_) { if (!fallbackCopyText(text)) throw new Error('Copy unavailable'); }
+      toast('已复制文本。'); return true;
+    } catch (_) { toast('复制未完成，请选中文字后按 Ctrl/Cmd+C。', 'error'); return false; }
+  }
   function dateValue(value) { if (!value) return null; const d = new Date(value); return Number.isNaN(d.getTime()) ? null : d; }
   function time(value) { const d = dateValue(value); return d ? d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : ''; }
   function when(value) { const d = dateValue(value); if (!d) return ''; const now = new Date(); return d.toDateString() === now.toDateString() ? `今天 ${time(value)}` : `${d.getMonth() + 1}月${d.getDate()}日 ${time(value)}`; }
@@ -160,17 +181,34 @@
     renderHeader();
     updateProjectInList(state.project);
   }
-  function updateComposer() { const available = canWrite() && !state.projectLoading; $('message-input').disabled = !available; $('attach-button').disabled = !available || state.uploading > 0; $('send-message').disabled = !available || state.sending || state.uploading > 0 || (!$('message-input').value.trim() && !state.attachments.length); $('message-input').placeholder = state.project?.role === 'viewer' && !isOwner() ? '只读项目' : '发送消息…'; $('composer-note').textContent = state.project?.role === 'viewer' && !isOwner() ? '只读权限' : state.sending ? '正在发送…' : ''; }
+  function updateComposer() { const available = canWrite() && !state.projectLoading; $('message-input').disabled = !available; $('attach-button').disabled = !available || state.sending || state.uploading > 0; $('send-message').disabled = !available || state.sending || state.uploading > 0 || (!$('message-input').value.trim() && !state.attachments.length); $('message-input').placeholder = state.project?.role === 'viewer' && !isOwner() ? '只读项目' : '发送消息，或粘贴图片…'; $('composer-note').textContent = state.project?.role === 'viewer' && !isOwner() ? '只读权限' : state.sending ? '正在发送…' : ''; }
   function nearBottom() { const c = $('conversation'); return c.scrollHeight - c.scrollTop - c.clientHeight < 110; }
   function scrollBottom() { requestAnimationFrame(() => { const c = $('conversation'); c.scrollTop = c.scrollHeight; $('jump-latest').hidden = true; }); }
   function preserveScroll(fn, force = false) { const bottom = nearBottom(); fn(); if (bottom || force) scrollBottom(); else $('jump-latest').hidden = false; }
   function sortedMessages() { return [...state.messages.values()].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)) || String(a.id).localeCompare(String(b.id))); }
   function renderMessages() { const msgs = sortedMessages(); $('messages').replaceChildren(); msgs.forEach(m => $('messages').append(messageNode(m))); $('conversation-empty').hidden = !!msgs.length; $('load-history').hidden = !state.historyMore || !msgs.length; }
   function renderMessage(m) { const old = $('messages').querySelector(`[data-message-id="${CSS.escape(String(m.id))}"]`); const n = messageNode(m); if (old) old.replaceWith(n); else { const next = sortedMessages().find(x => String(x.created_at) > String(m.created_at)); const nextNode = next && $('messages').querySelector(`[data-message-id="${CSS.escape(String(next.id))}"]`); $('messages').insertBefore(n, nextNode || null); } $('conversation-empty').hidden = true; }
-  function safeHref(href) { try { const u = new URL(href, location.href); return ['http:', 'https:'].includes(u.protocol) ? u.href : null; } catch (_) { return null; } }
+  function safeHref(href) {
+    let path = href.startsWith('<') && href.endsWith('>') ? href.slice(1, -1) : href;
+    path = path.replace(/\\([\\()[\]<> ])/g, '$1');
+    if (!path || /[\u0000-\u001f\u007f]/.test(path) || path.startsWith('//')) return null;
+    if (/^https?:\/\//i.test(path)) { try { const url = new URL(path); return ['http:', 'https:'].includes(url.protocol) ? url.href : null; } catch (_) { return null; } }
+    if (path.startsWith('/api/')) return path;
+    if (/^[a-z][a-z0-9+.-]*:/i.test(path) && !/^sandbox:\//i.test(path) && !/^file:\/\//i.test(path)) return null;
+    if (/^file:/i.test(path) && !/^file:\/\/\//i.test(path)) return null;
+    if (/^[?#]/.test(path)) return null;
+    // Agent source links may include a line anchor; preserve all other path bytes.
+    path = path.replace(/(?::\d+(?::\d+)?|#L\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)$/, '');
+    return state.project?.id ? artifactURL(path) : null;
+  }
+  function isDownloadHref(href) { return /^\/api\/projects\/[^/]+\/(?:artifact\?|files\/[^/?]+(?:\?|$))/.test(href); }
+  function handleDownloadLink(event, href, filename) {
+    if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    event.preventDefault(); download(href, filename);
+  }
   function inline(parent, text) {
-    const regex = /(\*\*([^*\n]+)\*\*|`([^`\n]+)`|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+|\/[^\s)]+)\))/g; let match; let last = 0;
-    while ((match = regex.exec(text))) { parent.append(document.createTextNode(text.slice(last, match.index))); if (match[2]) parent.append(el('strong', '', match[2])); else if (match[3]) parent.append(el('code', '', match[3])); else { const href = safeHref(match[5]); if (href) { const a = el('a', '', match[4]); a.href = href; a.target = '_blank'; a.rel = 'noopener noreferrer'; parent.append(a); } else parent.append(document.createTextNode(match[0])); } last = regex.lastIndex; }
+    const regex = /(\*\*([^*\n]+)\*\*|`([^`\n]+)`|\[([^\]\n]+)\]\((<[^>\n]+>|(?:\\.|[^\s()\\]|\((?:\\.|[^()\\])*\))+)(?:\s+"[^"\n]*")?\))/g; let match; let last = 0;
+    while ((match = regex.exec(text))) { parent.append(document.createTextNode(text.slice(last, match.index))); if (match[2]) parent.append(el('strong', '', match[2])); else if (match[3]) parent.append(el('code', '', match[3])); else { const href = safeHref(match[5]); if (href) { const a = el('a', '', match[4]); a.href = href; if (isDownloadHref(href)) { a.download = ''; a.addEventListener('click', event => handleDownloadLink(event, href)); } else { a.target = '_blank'; a.rel = 'noopener noreferrer'; } parent.append(a); } else parent.append(document.createTextNode(match[0])); } last = regex.lastIndex; }
     parent.append(document.createTextNode(text.slice(last)));
   }
   function markdown(text) {
@@ -189,8 +227,11 @@
     if (m.error) body.append(el('div', 'message-error', m.error));
     const t = state.turns.get(String(m.turn_id)) || { id: m.turn_id, status: m.status, author_id: m.author?.id };
     if (m.role === 'assistant' && state.tools.has(String(m.turn_id))) { const ts = el('div', 'tool-events'); state.tools.get(String(m.turn_id)).slice(-6).forEach(tool => { const detail = el('details', 'tool-event'); const summary = el('summary'); summary.append(icon(tool.status === 'complete' ? 'check' : 'tool'), el('span', '', `${tool.name || '工具'} · ${labels[tool.status] || tool.status || '处理中'}`)); detail.append(summary); if (tool.content) detail.append(el('pre', '', String(tool.content).slice(0, 6000))); ts.append(detail); }); body.append(ts); }
-    if (m.turn_id && m.role === 'user' && activeStatuses.has(t.status) && canCancel(t)) { const actions = el('div', 'message-actions'); actions.append(button(t.status === 'queued' ? '取消排队' : '停止任务', 'quiet-btn', () => cancelTurn(t.id), 'stop')); body.append(actions); }
-    if (m.turn_id && m.role === 'user' && ['failed', 'interrupted', 'cancelled'].includes(t.status) && canRetry(t)) { const actions = el('div', 'message-actions'); actions.append(button('重新尝试', 'quiet-btn', () => retryTurn(t.id), 'refresh')); body.append(actions); }
+    const actions = el('div', 'message-actions');
+    if (String(m.content || '').trim()) actions.append(button('复制', 'quiet-btn message-copy', () => copyMessageText(String(m.content))));
+    if (m.turn_id && m.role === 'user' && activeStatuses.has(t.status) && canCancel(t)) actions.append(button(t.status === 'queued' ? '取消排队' : '停止任务', 'quiet-btn', () => cancelTurn(t.id), 'stop'));
+    if (m.turn_id && m.role === 'user' && ['failed', 'interrupted', 'cancelled'].includes(t.status) && canRetry(t)) actions.append(button('重新尝试', 'quiet-btn', () => retryTurn(t.id), 'refresh'));
+    if (actions.childElementCount) body.append(actions);
     node.append(body); return node;
   }
   async function loadHistory() { if (!state.project || state.loadingHistory || !state.historyMore) return; const msgs = sortedMessages(); if (!msgs.length) return; const epoch = state.epoch; const c = $('conversation'); const beforeHeight = c.scrollHeight; state.loadingHistory = true; $('load-history').disabled = true; try { const d = await api(projectAPI(`/messages?before=${encodeURIComponent(msgs[0].created_at)}&limit=100`)); if (epoch !== state.epoch) return; const oldTop = c.scrollTop; const n = (d.messages || []).length; (d.messages || []).forEach(m => state.messages.set(String(m.id), m)); state.historyMore = n >= 100; renderMessages(); c.scrollTop = oldTop + c.scrollHeight - beforeHeight; } catch (err) { toast(err.message, 'error'); } finally { state.loadingHistory = false; $('load-history').disabled = false; } }
@@ -205,6 +246,7 @@
   async function cancelTurn(id) { try { await api(projectAPI(`/turns/${encodeURIComponent(id)}/cancel`), { method: 'POST', body: {} }); toast('已发出停止请求。'); } catch (err) { toast(err.message, 'error'); } }
   async function retryTurn(id) { const pid = state.project?.id; const epoch = state.epoch; try { const d = await api(projectAPI(`/turns/${encodeURIComponent(id)}/retry`, pid), { method: 'POST', body: { client_id: uuid() } }); if (epoch !== state.epoch) return; if (d.turn) updateTurn(d.turn); if (d.message) { state.messages.set(String(d.message.id), d.message); preserveScroll(() => renderMessage(d.message), true); } toast('已重新加入任务队列。'); } catch (err) { toast(err.message, 'error'); } }
   async function uploadFiles(fileList) {
+    if (state.sending) { toast('消息正在发送，请稍后再添加或粘贴图片。', 'error'); return; }
     if (!canWrite() || state.projectLoading) return; const files = [...fileList]; const pid = state.project.id; const epoch = state.epoch;
     for (const file of files) {
       if (epoch !== state.epoch) break; if (file.size > 50 * 1024 * 1024) { toast(`${file.name} 超过 50 MB，请选择较小的文件。`, 'error'); continue; }
@@ -214,6 +256,19 @@
       finally { if (epoch === state.epoch) { state.uploading = Math.max(0, state.uploading - 1); renderUploads(); updateComposer(); } }
     }
     $('file-input').value = '';
+  }
+  function clipboardImageFiles(data) {
+    // files and items normally describe the same images. Use one source only.
+    const files = Array.from(data?.files || []).filter(file => file.type.startsWith('image/'));
+    if (files.length) return files;
+    return Array.from(data?.items || []).filter(item => item.kind === 'file' && item.type.startsWith('image/')).map(item => item.getAsFile()).filter(Boolean);
+  }
+  function handleComposerPaste(event) {
+    if (event.defaultPrevented || !canWrite() || state.projectLoading || $('message-input').disabled) return;
+    const files = clipboardImageFiles(event.clipboardData); if (!files.length) return;
+    const text = event.clipboardData.getData('text/plain'); event.preventDefault();
+    if (text) { const input = $('message-input'); input.setRangeText(text, input.selectionStart, input.selectionEnd, 'end'); input.dispatchEvent(new Event('input', { bubbles: true })); }
+    uploadFiles(files);
   }
   function renderUploads(uploadingName) { $('upload-list').replaceChildren(); state.attachments.forEach(f => { const chip = el('div', 'upload-item'); chip.append(icon('paper'), el('span', '', f.name), iconButton('移除附件', 'close', () => { state.attachments = state.attachments.filter(x => x.id !== f.id); renderUploads(); updateComposer(); })); $('upload-list').append(chip); }); if (state.uploading) { const chip = el('div', 'upload-item uploading'); chip.append(icon('upload'), el('span', '', `正在上传${uploadingName ? ` ${uploadingName}` : '…'}`)); $('upload-list').append(chip); } }
   function localFileURL(f) { return `/api${projectAPI(`/files/${encodeURIComponent(f.id)}`, f.project_id || state.project.id)}`; }
@@ -230,10 +285,94 @@
   }
   function openArtifact(filename, path) { const url = artifactURL(path); if (/\.pdf$/i.test(filename)) previewPDF(filename, `${url}&inline=1`, url); else if (previewableName(filename)) previewImage(filename, `${url}&inline=1`, url); else download(url, filename); }
   function openFile(f) { const url = localFileURL(f); if (/\.pdf$/i.test(f.name)) previewPDF(f.name, `${url}?inline=1`, url); else if (previewableName(f.name)) previewImage(f.name, `${url}?inline=1`, url); else download(url, f.name); }
-  function download(url, filename) { const a = el('a'); a.href = url; a.download = filename || ''; document.body.append(a); a.click(); a.remove(); }
-  function preparePreview(filename, downloadURL) { $('preview-title').textContent = filename; $('preview-download').href = downloadURL; $('preview-download').download = filename; $('pdf-preview').hidden = true; $('figure-preview').hidden = true; $('pdf-preview').removeAttribute('src'); $('figure-preview').removeAttribute('src'); if (!$('preview-dialog').open) $('preview-dialog').showModal(); }
+  async function download(url, filename) {
+    try {
+      // Check errors without buffering the file; the browser streams the GET to disk.
+      let response; try { response = await fetch(url, { method: 'HEAD', credentials: 'same-origin' }); } catch (_) { throw new Error('连接暂时中断，请检查网络后重试。'); }
+      if (!response.ok) {
+        if (response.status === 401) { showLogin(); throw new Error('登录已过期，请重新登录后下载。'); }
+        const errors = { 400: '文件路径无效，请让助手重新生成下载链接。', 403: '没有权限下载该文件。', 404: '文件不存在，请让助手检查文件或重新生成。' };
+        throw new Error(errors[response.status] || `下载未完成（${response.status}），请重试。`);
+      }
+      const a = el('a'); a.href = url; a.download = filename || ''; document.body.append(a); a.click(); a.remove();
+    } catch (err) { toast(err.message, 'error'); }
+  }
+  const maxClipboardImageBytes = 20 * 1024 * 1024;
+  const maxClipboardImagePixels = 16 * 1024 * 1024;
+  let previewGeneration = 0;
+  function checkClipboardImageSize(width, height) {
+    if (!width || !height || width > 8192 || height > 8192 || width * height > maxClipboardImagePixels) throw new Error('图片尺寸过大，请下载后复制。');
+  }
+  async function readClipboardImageBlob(response) {
+    if (Number(response.headers.get('content-length')) > maxClipboardImageBytes) { response.body?.cancel().catch(() => {}); throw new Error('图片超过 20 MB，请下载后复制。'); }
+    const type = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(type)) { response.body?.cancel().catch(() => {}); throw new Error('此图片暂不支持直接复制，请右键复制图片或下载。'); }
+    if (!response.body?.getReader) { const blob = await response.blob(); if (blob.size > maxClipboardImageBytes) throw new Error('图片超过 20 MB，请下载后复制。'); return blob; }
+    const reader = response.body.getReader(); const chunks = []; let size = 0;
+    try {
+      while (true) { const chunk = await reader.read(); if (chunk.done) break; size += chunk.value.byteLength; if (size > maxClipboardImageBytes) { await reader.cancel(); throw new Error('图片超过 20 MB，请下载后复制。'); } chunks.push(chunk.value); }
+      return new Blob(chunks, { type });
+    } finally { reader.releaseLock(); }
+  }
+  async function previewImageToPngBlob(src) {
+    const url = new URL(src, location.href);
+    if (url.origin !== location.origin || !url.pathname.startsWith('/api/')) throw new Error('此图片请右键复制图片或下载。');
+    const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 20000);
+    let blob;
+    try { const response = await fetch(url.href, { credentials: 'same-origin', redirect: 'error', signal: controller.signal }); if (!response.ok) throw new Error('图片读取失败，请重新打开预览后重试。'); blob = await readClipboardImageBlob(response); }
+    finally { clearTimeout(timeout); }
+    const header = new Uint8Array(await blob.slice(0, 32).arrayBuffer());
+    const signature = (offset, values) => values.every((byte, i) => header[offset + i] === byte);
+    if (blob.type === 'image/png') {
+      if (header.length < 24 || !signature(0, [137, 80, 78, 71, 13, 10, 26, 10]) || !signature(12, [73, 72, 68, 82])) throw new Error('图片读取失败，请右键复制图片或下载。');
+      const view = new DataView(header.buffer); checkClipboardImageSize(view.getUint32(16), view.getUint32(20)); return blob;
+    }
+    const validRaster = blob.type === 'image/jpeg' ? signature(0, [255, 216, 255]) : blob.type === 'image/gif' ? signature(0, [71, 73, 70, 56]) && [55, 57].includes(header[4]) && header[5] === 97 : blob.type === 'image/webp' && signature(0, [82, 73, 70, 70]) && signature(8, [87, 69, 66, 80]);
+    if (!validRaster) throw new Error('图片读取失败，请右键复制图片或下载。');
+    const preview = $('figure-preview'); if (preview.src === src && preview.naturalWidth) checkClipboardImageSize(preview.naturalWidth, preview.naturalHeight);
+    const objectURL = URL.createObjectURL(blob); const image = new Image(); const canvas = document.createElement('canvas');
+    try {
+      // Decode only raster MIME types; never load SVG or HTML clipboard content.
+      image.src = objectURL; await image.decode(); checkClipboardImageSize(image.naturalWidth, image.naturalHeight);
+      canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
+      const context = canvas.getContext('2d'); if (!context) throw new Error('无法复制图片，请右键复制图片或下载。');
+      context.drawImage(image, 0, 0);
+      const png = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error('图片转换失败，请右键复制图片或下载。')), 'image/png'));
+      if (png.size > maxClipboardImageBytes) throw new Error('图片超过 20 MB，请下载后复制。'); return png;
+    } finally { image.removeAttribute('src'); URL.revokeObjectURL(objectURL); canvas.width = 0; canvas.height = 0; }
+  }
+  async function copyPreviewImage() {
+    const image = $('figure-preview'); const copy = $('preview-copy-image');
+    if (!$('preview-dialog').open || image.hidden || !image.getAttribute('src') || copy.disabled) return false;
+    if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined' || (ClipboardItem.supports && !ClipboardItem.supports('image/png'))) { toast('当前浏览器无法直接复制图片，请右键复制图片或下载。', 'error'); return false; }
+    const generation = previewGeneration; copy.disabled = true; copy.textContent = '正在复制…';
+    try {
+      const png = previewImageToPngBlob(image.src).then(blob => { if (generation !== previewGeneration || !$('preview-dialog').open) throw new Error('预览已关闭，请重新打开图片后复制。'); return blob; });
+      // Call write during the original click/key gesture, including on Safari.
+      // Handle the conversion promise even if a browser rejects write immediately.
+      png.catch(() => {});
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
+      if (generation === previewGeneration) toast('已复制图片。'); return true;
+    } catch (err) { if (generation === previewGeneration) toast(/^(图片|此图片|无法复制|预览已)/.test(err.message) ? err.message : '复制未完成，请右键复制图片或下载。', 'error'); return false; }
+    finally { if (generation === previewGeneration) { copy.disabled = false; copy.textContent = '复制图片'; } }
+  }
+  function handlePreviewCopyShortcut(event) {
+    if (event.defaultPrevented || event.repeat || event.isComposing || !(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey || event.key.toLowerCase() !== 'c') return;
+    if (!$('preview-dialog').open || $('figure-preview').hidden || $('preview-copy-image').disabled) return;
+    const target = event.target; const active = document.activeElement;
+    if ([target, active].some(node => node instanceof Element && (node.matches('input, textarea, select') || node.isContentEditable))) return;
+    if (window.getSelection()?.toString()) return;
+    event.preventDefault(); copyPreviewImage();
+  }
+  function preparePreview(filename, downloadURL) { previewGeneration++; $('preview-copy-image').hidden = true; $('preview-copy-image').disabled = false; $('preview-copy-image').textContent = '复制图片'; $('preview-copy-image').title = '复制图片（Ctrl/Cmd+C）'; $('preview-help').textContent = '无法显示预览时，可下载文件后查看。'; $('preview-title').textContent = filename; $('preview-download').href = downloadURL; $('preview-download').download = filename; $('pdf-preview').hidden = true; $('figure-preview').hidden = true; $('pdf-preview').removeAttribute('src'); $('figure-preview').removeAttribute('src'); if (!$('preview-dialog').open) $('preview-dialog').showModal(); }
   function previewPDF(filename, inlineURL, downloadURL) { preparePreview(filename, downloadURL); $('pdf-preview').hidden = false; $('pdf-preview').src = inlineURL; }
-  function previewImage(filename, inlineURL, downloadURL) { preparePreview(filename, downloadURL); $('figure-preview').hidden = false; $('figure-preview').alt = filename; $('figure-preview').src = inlineURL; }
+  function previewImage(filename, inlineURL, downloadURL) {
+    preparePreview(filename, downloadURL); $('figure-preview').hidden = false; $('figure-preview').alt = filename; $('figure-preview').src = inlineURL;
+    const url = new URL(inlineURL, location.href); const svg = /\.svg$/i.test(filename) || /\.svg$/i.test(url.pathname) || /\.svg$/i.test(url.searchParams.get('path') || '');
+    $('preview-copy-image').hidden = false; $('preview-copy-image').disabled = svg;
+    $('preview-copy-image').title = svg ? '此图片请右键复制图片或下载' : '复制图片（Ctrl/Cmd+C）';
+    $('preview-help').textContent = svg ? '此图片可右键复制或下载。' : 'Ctrl/Cmd+C 复制图片；选中文字时复制文字。';
+  }
   function renderFiles() { $('shared-files').replaceChildren(); if (!state.files.length) $('shared-files').append(el('p', 'empty-small', '还没有共享文件。通过对话框上传论文、图片或结果。')); state.files.slice().sort((a, b) => String(b.created_at).localeCompare(String(a.created_at))).forEach(f => $('shared-files').append(fileRow(f.name, f.size, 'file', () => openFile(f), () => download(localFileURL(f), f.name)))); }
   function fileRow(filename, size, type, open, save) { const row = el('div', 'file-row'); const ext = filename.includes('.') ? filename.split('.').pop().slice(0, 4).toUpperCase() : 'FILE'; const mark = el('span', `file-type ${type === 'directory' ? 'directory' : ext.toLowerCase()}`); if (type === 'directory') mark.append(icon('folder')); else mark.textContent = ext; const info = button('', 'file-row-info', open); info.append(el('span', 'file-name', filename), el('span', 'file-size', type === 'directory' ? '文件夹' : bytes(size))); row.append(mark, info); if (save) row.append(iconButton('下载文件', 'download', save)); return row; }
   async function refreshFiles() { const epoch = state.epoch; if (!state.project) return; try { const d = await api(projectAPI('/files')); if (epoch !== state.epoch) return; state.files = d.files || []; renderFiles(); } catch (err) { toast(err.message, 'error'); } }
@@ -526,7 +665,7 @@
   $('message-input').addEventListener('keydown', event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) { event.preventDefault(); sendMessage(); } });
   $('attach-button').addEventListener('click', () => $('file-input').click()); $('file-input').addEventListener('change', e => uploadFiles(e.target.files));
   $('composer').addEventListener('dragover', e => { e.preventDefault(); if (canWrite()) $('composer').classList.add('drag-over'); }); $('composer').addEventListener('dragleave', e => { if (!$('composer').contains(e.relatedTarget)) $('composer').classList.remove('drag-over'); }); $('composer').addEventListener('drop', e => { e.preventDefault(); $('composer').classList.remove('drag-over'); if (e.dataTransfer?.files?.length) uploadFiles(e.dataTransfer.files); });
-  $('message-input').addEventListener('paste', e => { const files = [...(e.clipboardData?.files || [])]; if (files.length) { e.preventDefault(); uploadFiles(files); } });
+  $('message-input').addEventListener('paste', handleComposerPaste);
   $('load-history').addEventListener('click', loadHistory); $('conversation').addEventListener('scroll', () => { if (nearBottom()) $('jump-latest').hidden = true; }); $('jump-latest').addEventListener('click', scrollBottom); $('cancel-active').addEventListener('click', () => { if (state.project?.active_turn) cancelTurn(state.project.active_turn.id); });
   $('refresh-files').addEventListener('click', refreshFiles); $('refresh-workspace').addEventListener('click', () => loadWorkspace(state.workspacePath)); $('refresh-insights').addEventListener('click', loadInsights); $('refresh-activity').addEventListener('click', loadActivity);
   document.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('click', () => { state.tab = b.dataset.tab; renderTab(); if (state.tab === 'activity') renderActivity(); }));
@@ -534,7 +673,10 @@
   $('close-dialog').addEventListener('click', () => { if (!state.dialogBusy) $('form-dialog').close(); }); $('dialog-cancel').addEventListener('click', () => { if (!state.dialogBusy) $('form-dialog').close(); });
   $('form-dialog').addEventListener('cancel', event => { if (state.dialogBusy) event.preventDefault(); });
   $('dialog-form').addEventListener('submit', async e => { e.preventDefault(); const action = state.dialogAction; if (!action || $('dialog-submit').disabled || state.dialogBusy || (state.dialogCanSubmit && !state.dialogCanSubmit())) return; state.dialogBusy = true; $('dialog-submit').disabled = true; $('dialog-error').hidden = true; try { const close = await action(); if (close !== false && state.dialogAction === action) $('form-dialog').close(); } catch (err) { if (state.dialogAction === action) { $('dialog-error').textContent = err.message; $('dialog-error').hidden = false; } } finally { if (state.dialogAction === action) { state.dialogBusy = false; $('dialog-submit').disabled = !!state.dialogCanSubmit && !state.dialogCanSubmit(); } } });
-  $('close-preview').addEventListener('click', () => $('preview-dialog').close()); $('preview-dialog').addEventListener('close', () => { $('pdf-preview').removeAttribute('src'); $('figure-preview').removeAttribute('src'); $('pdf-preview').hidden = true; $('figure-preview').hidden = true; });
+  $('preview-download').addEventListener('click', event => handleDownloadLink(event, $('preview-download').href, $('preview-download').download));
+  $('preview-copy-image').addEventListener('click', copyPreviewImage);
+  $('close-preview').addEventListener('click', () => $('preview-dialog').close()); $('preview-dialog').addEventListener('close', () => { previewGeneration++; $('preview-copy-image').hidden = true; $('pdf-preview').removeAttribute('src'); $('figure-preview').removeAttribute('src'); $('pdf-preview').hidden = true; $('figure-preview').hidden = true; });
+  document.addEventListener('keydown', handlePreviewCopyShortcut);
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawers(); });
   document.querySelectorAll('[data-tab]').forEach(b => { b.setAttribute('aria-controls', `panel-${b.dataset.tab}`); b.addEventListener('keydown', e => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return; e.preventDefault(); const tabs = [...document.querySelectorAll('[data-tab]')]; const index = tabs.indexOf(b); const next = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (index + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length; tabs[next].focus(); tabs[next].click(); }); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { heartbeat(state.epoch); if (state.project && !state.source) connectEvents(state.epoch); } });
