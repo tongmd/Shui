@@ -114,7 +114,12 @@ def test_validation_csrf_bridge_scope_and_cap(collab):
         c.execute("UPDATE projects SET provider='codex' WHERE id=?", (pid,))
     for i in range(8):
         assert assign(collab, client_id=f"task-limit-{i:02d}").status_code == 201
-    assert assign(collab).status_code == 429
+    assert assign(collab).status_code == 201  # Repeat mentions share one open task.
+    for index in range(8):
+        member = app.state.store.create_user(f"limit-member-{index}", "Limit member", "test-password")
+        assert clients["owner"].post(f"/api/projects/{pid}/members", json={"username": member["username"]}).status_code == 200
+        response = assign(collab, client_id=f"limit-member-{index}", assignee_ids=[member["id"]])
+        assert response.status_code == (201 if index < 7 else 429)
     assert assign(collab, client_id="task-limit-00").status_code == 201
 
 
@@ -141,6 +146,11 @@ def test_attachment_is_validated_reference_no_implicit_copy(collab):
     task = assign(collab, attachment_ids=[uploaded["id"]]).json()["delegation"]
     assert task["attachments"][0]["project_id"] == pid
     assert task["attachment_ids"] == [uploaded["id"]]
+    child_messages = clients["assignee"].get(f"/api/projects/{task['child_project_id']}/messages").json()["messages"]
+    assignment = next(message for message in child_messages if message["role"] == "user")
+    assert assignment["delegation_request"]["context"] == "Only this explicit context"
+    assert assignment["attachments"][0]["download_url"] == uploaded["download_url"]
+    assert assignment["delegation_id"] == task["id"]
     assert list((app.state.store.workspace(task["child_project_id"]) / "uploads").iterdir()) == []
     other = owner.post("/api/projects", json={"name": "Unrelated"}).json()["id"]
     foreign = owner.post(f"/api/projects/{other}/files", files={"file": ("private.txt", b"Do not share")}).json()
@@ -361,3 +371,181 @@ def test_cancelled_integration_status_is_published_to_task_card(collab, via_memb
     last = [event for event in events if event["type"] == "delegation.updated"][-1]
     assert last["payload"]["delegation"]["merge_turn"]["status"] == "cancelled"
     assert last["payload"]["delegation"]["status"] == "completed"
+
+
+def test_member_session_reuses_open_task_and_retains_each_request_brief(collab):
+    app, clients, users, pid = collab
+    first = assign(collab).json()
+    task = first["delegation"]
+    child = task["child_project_id"]
+    with app.state.store.connect() as c:
+        c.execute("UPDATE projects SET native_session_id='member-native-123' WHERE id=?", (child,))
+    second = assign(collab, actor="reader", client_id="second-mention-01", title="Another request", content="A different task", context="Second brief only").json()
+    assert second["delegation"]["id"] == task["id"]
+    assert second["delegation"]["child_project_id"] == child
+    assert second["turn"]["id"] != first["turn"]["id"]
+    assert second["message"]["id"] != first["message"]["id"]
+    assert second["message"]["delegation_request"]["title"] == "Another request"
+    assert set(second["delegation"]["creator_ids"]) == {users["creator"]["id"], users["reader"]["id"]}
+    assert second["delegation"]["request_count"] == 2
+    assert clients["reader"].get(f"/api/projects/{child}").json()["project"]["role"] == "editor"
+    with app.state.store.connect() as c:
+        assert c.execute("SELECT native_session_id FROM projects WHERE id=?", (child,)).fetchone()[0] == "member-native-123"
+        assert c.execute("SELECT COUNT(*) FROM collaboration_sessions").fetchone()[0] == 1
+        assert c.execute("SELECT COUNT(*) FROM delegations").fetchone()[0] == 1
+        assert app.state.store.delegation_request_for_turn(c, first["turn"]["id"])["context"] == "Only this explicit context"
+        assert app.state.store.delegation_request_for_turn(c, second["turn"]["id"])["context"] == "Second brief only"
+    events = clients["viewer"].get(f"/api/projects/{child}/event-batch").json()["events"]
+    assert [e for e in events if e["type"] == "delegation.updated"][-1]["payload"]["delegation"]["request_count"] == 2
+    details = clients["creator"].get(f"/api/projects/{pid}/delegations").json()
+    assert len(details["sessions"]) == 1 and details["sessions"][0]["assignee_id"] == users["assignee"]["id"]
+
+
+def test_closed_task_new_assignment_reuses_native_without_mutating_old_result(collab):
+    app, clients, users, pid = collab
+    first = assign(collab).json()
+    old = first["delegation"]
+    child = old["child_project_id"]
+    finish(app, old, "First task immutable result")
+    merged = clients["creator"].post(merge_url(pid, old), json={"client_id": "first-task-merge01"}).json()
+    with app.state.store.connect() as c:
+        c.execute("UPDATE projects SET native_session_id='reused-native-123' WHERE id=?", (child,))
+        c.execute("UPDATE turns SET status='failed' WHERE id=?", (first["turn"]["id"],))
+    second = assign(collab, client_id="second-cycle-001", content="New cycle").json()
+    current = second["delegation"]
+    assert current["id"] != old["id"] and current["child_project_id"] == child
+    assert current["status"] == "open"
+    assert clients["owner"].get(f"/api/projects/{child}").json()["project"]["native_session_id"] == "reused-native-123"
+    # Repeating old merge is idempotent even while the new task is active.
+    replay = clients["creator"].post(merge_url(pid, old), json={"client_id": "replay-old-merge01"}).json()
+    assert replay["turn"]["id"] == merged["turn"]["id"]
+    assert replay["delegation"]["summary"] == "First task immutable result"
+    assert replay["delegation"]["queued_count"] == 0
+    assert clients["creator"].post(f"/api/projects/{child}/turns/{first['turn']['id']}/retry", json={"client_id": "closed-task-retry"}).status_code == 409
+    # A failed second task must not use the first task's final answer as its result.
+    with app.state.store.connect() as c:
+        c.execute("UPDATE turns SET status='failed' WHERE id=?", (second["turn"]["id"],))
+        c.execute("UPDATE messages SET status='failed' WHERE turn_id=?", (second["turn"]["id"],))
+    assert clients["creator"].post(merge_url(pid, current), json={"client_id": "empty-new-merge01"}).status_code == 400
+    history = clients["creator"].get(f"/api/projects/{pid}/delegations").json()
+    assert len(history["delegations"]) == 2 and len(history["sessions"]) == 1
+    assert history["sessions"][0]["delegation"]["id"] == current["id"]
+
+
+def test_multi_member_batch_is_distinct_sessions_atomic_and_idempotent(collab):
+    app, clients, users, pid = collab
+    members = [users["assignee"]["id"], users["reader"]["id"]]
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        responses = list(pool.map(lambda _: assign(collab, assignee_ids=members), range(3)))
+    assert all(r.status_code == 201 for r in responses)
+    first = responses[0].json()
+    assert len(first["assignments"]) == 2
+    assert first["delegation"] == first["assignments"][0]["delegation"]
+    children = {item["delegation"]["child_project_id"] for item in first["assignments"]}
+    assert len(children) == 2
+    assert all({item["delegation"]["child_project_id"] for item in r.json()["assignments"]} == children for r in responses)
+    by_member = {item["delegation"]["session_assignee"]["id"]: item for item in first["assignments"]}
+    own = by_member[users["assignee"]["id"]]["delegation"]["child_project_id"]
+    other = by_member[users["reader"]["id"]]["delegation"]["child_project_id"]
+    assert clients["assignee"].get(f"/api/projects/{own}").json()["project"]["role"] == "editor"
+    assert clients["assignee"].get(f"/api/projects/{other}").json()["project"]["role"] == "viewer"
+    assert assign(collab, assignee_ids=[members[0]]).status_code == 409
+    with app.state.store.connect() as c:
+        assert c.execute("SELECT COUNT(*) FROM collaboration_sessions").fetchone()[0] == 2
+        assert c.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == 2
+        assert c.execute("SELECT COUNT(*) FROM delegation_requests").fetchone()[0] == 2
+        assert c.execute("SELECT COUNT(*) FROM turns WHERE project_id=?", (pid,)).fetchone()[0] == 0
+
+
+def test_batch_failure_does_not_partially_assign_or_remove_existing_workspace(collab, monkeypatch):
+    app, clients, users, pid = collab
+    existing = assign(collab).json()["delegation"]
+    root = app.state.store.workspace(existing["child_project_id"])
+    (root / "keep.txt").write_text("Existing work")
+    original = app.state.store.enqueue_turn
+    calls = 0
+
+    def fail_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        result = original(*args, **kwargs)
+        if calls == 2:
+            raise RuntimeError("Injected batch failure")
+        return result
+
+    monkeypatch.setattr(app.state.store, "enqueue_turn", fail_second)
+    with pytest.raises(RuntimeError, match="Injected batch"):
+        assign(collab, client_id="fail-whole-batch", assignee_ids=[users["assignee"]["id"], users["reader"]["id"]])
+    assert (root / "keep.txt").read_text() == "Existing work"
+    with app.state.store.connect() as c:
+        assert c.execute("SELECT COUNT(*) FROM collaboration_sessions").fetchone()[0] == 1
+        assert c.execute("SELECT COUNT(*) FROM delegation_requests").fetchone()[0] == 1
+        assert c.execute("SELECT COUNT(*) FROM turns").fetchone()[0] == 1
+    assert len(list((app.state.store.root / "projects").iterdir())) == 2
+
+
+def test_cancelled_old_task_cannot_cancel_new_task_in_reused_session(collab):
+    app, clients, users, pid = collab
+    old = assign(collab).json()["delegation"]
+    endpoint = merge_url(pid, old).replace("/merge", "/cancel")
+    assert clients["creator"].post(endpoint).status_code == 200
+    new = assign(collab, client_id="after-cancel-new").json()
+    assert new["delegation"]["child_project_id"] == old["child_project_id"]
+    assert new["delegation"]["id"] != old["id"]
+    assert clients["creator"].post(endpoint).status_code == 200
+    with app.state.store.connect() as c:
+        assert c.execute("SELECT status FROM turns WHERE id=?", (new["turn"]["id"],)).fetchone()[0] == "queued"
+        assert app.state.store.delegation_for_turn(c, new["turn"]["id"])["id"] == new["delegation"]["id"]
+
+
+def test_legacy_unique_child_migration_preserves_results_references_and_unrelated_fk(collab):
+    import sqlite3
+    from shui.store import Store
+
+    app, clients, users, pid = collab
+    first = assign(collab).json()["delegation"]
+    finish(app, first, "Legacy result must survive")
+    merged = clients["creator"].post(merge_url(pid, first), json={"client_id": "legacy-merge-001"}).json()
+    # Build the old one-window-per-task shape, including duplicate member sessions.
+    with app.state.store.connect() as c:
+        c.execute("DELETE FROM collaboration_sessions")
+    second = assign(collab, client_id="legacy-second01").json()["delegation"]
+    shared = assign(collab, client_id="legacy-shared01", assignee_ids=[users["reader"]["id"]]).json()["delegation"]
+    with app.state.store.connect() as c:
+        c.execute("INSERT INTO delegation_assignees VALUES(?,?)", (shared["id"], users["creator"]["id"]))
+    c = sqlite3.connect(app.state.store.path)
+    c.execute("PRAGMA foreign_keys=OFF")
+    c.execute("DROP TABLE delegation_turns")
+    c.execute("DROP TABLE delegation_requests")
+    c.execute("DROP TABLE collaboration_sessions")
+    schema = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='delegations'").fetchone()[0]
+    schema = "CREATE TABLE legacy_delegations " + schema[schema.index("("):]
+    schema = schema.replace("child_project_id TEXT NOT NULL REFERENCES", "child_project_id TEXT NOT NULL UNIQUE REFERENCES")
+    c.execute(schema)
+    c.execute("INSERT INTO legacy_delegations SELECT * FROM delegations")
+    c.execute("DROP TABLE delegations")
+    c.execute("ALTER TABLE legacy_delegations RENAME TO delegations")
+    # This pre-existing unrelated author defect must neither block startup nor be changed.
+    c.execute("UPDATE projects SET created_by='legacy-missing-author' WHERE id=?", (pid,))
+    c.commit()
+    baseline = set(c.execute("PRAGMA foreign_key_check").fetchall())
+    c.close()
+    restarted = Store(app.state.store.root)
+    with restarted.connect() as c:
+        assert {tuple(row) for row in c.execute("PRAGMA foreign_key_check")} == baseline
+        sessions = c.execute("SELECT * FROM collaboration_sessions").fetchall()
+        assert len(sessions) == 1
+        assert sessions[0]["child_project_id"] == second["child_project_id"]
+        assert c.execute("SELECT summary FROM delegations WHERE id=?", (first["id"],)).fetchone()[0] == "Legacy result must survive"
+        assert c.execute("SELECT turn_id FROM delegation_merge_attempts WHERE delegation_id=?", (first["id"],)).fetchone()[0] == merged["turn"]["id"]
+        assert c.execute("SELECT COUNT(*) FROM delegation_assignees WHERE delegation_id=?", (shared["id"],)).fetchone()[0] == 2
+        assert c.execute("SELECT status FROM delegations WHERE id=?", (shared["id"],)).fetchone()[0] == "cancelled"
+        assert c.execute("SELECT status FROM turns WHERE project_id=?", (shared["child_project_id"],)).fetchone()[0] == "cancelled"
+        assert c.execute("SELECT status FROM projects WHERE id=?", (shared["child_project_id"],)).fetchone()[0] == "idle"
+        assert restarted.project_role(c, shared["child_project_id"], users["owner"]) == "viewer"
+        assert restarted.delegation_request_for_turn(c, c.execute("SELECT id FROM turns WHERE project_id=?", (second["child_project_id"],)).fetchone()[0])
+    # A second startup is idempotent and does not duplicate mappings/requests.
+    again = Store(app.state.store.root)
+    with again.connect() as c:
+        assert c.execute("SELECT COUNT(*) FROM collaboration_sessions").fetchone()[0] == 1
+        assert c.execute("SELECT COUNT(*) FROM delegation_requests").fetchone()[0] == 2

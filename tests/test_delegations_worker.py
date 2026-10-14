@@ -48,7 +48,7 @@ def rows(store, sql, values=()):
         return [dict(row) for row in c.execute(sql, values)]
 
 
-def delegate(client, parent, assignee, client_id="task-request-1", attachments=None):
+def delegate(client, parent, assignee, client_id="task-request-1", attachments=None, **overrides):
     response = client.post(f"/api/projects/{parent}/delegations", json={
         "content": "Verify the failure predictor and prepare a figure",
         "title": "Verify failure predictor",
@@ -56,6 +56,7 @@ def delegate(client, parent, assignee, client_id="task-request-1", attachments=N
         "assignee_ids": [assignee["id"]],
         "attachment_ids": attachments or [],
         "client_id": client_id,
+        **overrides,
     })
     assert response.status_code == 201, response.text
     return response.json()
@@ -89,6 +90,7 @@ async def test_child_starts_independently_resumes_and_keeps_research_local(colla
     (store.workspace(parent) / "research.json").write_text(parent_manifest)
     created = delegate(client, parent, assignee)
     child = created["delegation"]["child_project_id"]
+    output_path = "tasks/" + created["delegation"]["id"] + "/result.png"
     seen = []
 
     async def runner(request, emit, cancel):
@@ -104,18 +106,20 @@ async def test_child_starts_independently_resumes_and_keeps_research_local(colla
         assert "READ-ONLY" in request.prompt
         assert str(store.workspace(parent)) in request.prompt
         assert "Do not edit the parent workspace" in request.prompt
+        assert "tasks/" + created["delegation"]["id"] in request.prompt
+        assert (request.workspace / output_path).parent.is_dir()
         await emit("session", {"session_id": "dedicated-child-session"})
         assert rows(store, "SELECT native_session_id FROM projects WHERE id=?", (child,))[0][
             "native_session_id"
         ] == "dedicated-child-session"
         # Binding is durable before fake inference produces any content.
         await emit("delta", {"text": "CHILD_DISCUSSION_ONLY"})
-        (request.workspace / "result.png").write_bytes(b"\x89PNG\r\n\x1a\nfigure")
+        (request.workspace / output_path).write_bytes(b"\x89PNG\r\n\x1a\nfigure")
         (request.workspace / "research.json").write_text(json.dumps({
             "experiments": [{"key": "child-check", "name": "Child validation"}],
-            "figures": [{"key": "child-result", "title": "Result", "path": "result.png"}],
+            "figures": [{"key": "child-result", "title": "Result", "path": output_path}],
         }))
-        return RunResult("dedicated-child-session", "CHILD_DISCUSSION_ONLY\n[result](result.png)")
+        return RunResult("dedicated-child-session", f"CHILD_DISCUSSION_ONLY\n[result]({output_path})")
 
     coordinator = Coordinator(store, runner)
     await coordinator.start()
@@ -139,7 +143,7 @@ async def test_child_starts_independently_resumes_and_keeps_research_local(colla
         ]
         assert rows(store, "SELECT id FROM experiments WHERE project_id=?", (parent,)) == []
         assert rows(store, "SELECT path FROM figures WHERE project_id=?", (child,)) == [
-            {"path": "result.png"}
+            {"path": output_path}
         ]
         parent_events = rows(store, "SELECT type,payload FROM events WHERE project_id=?", (parent,))
         assert all("CHILD_DISCUSSION_ONLY" not in event["payload"] for event in parent_events)
@@ -160,7 +164,11 @@ async def test_parent_and_multiple_children_run_concurrently(collaboration_app):
     app, client, parent, _, assignee = collaboration_app
     store = app.state.store
     first = delegate(client, parent, assignee)["delegation"]["child_project_id"]
-    second = delegate(client, parent, assignee, "task-request-2")["delegation"]["child_project_id"]
+    second_assignee = store.create_user("bob", "Bob", "test-password")
+    assert client.post(f"/api/projects/{parent}/members", json={
+        "username": "bob", "role": "editor",
+    }).status_code == 200
+    second = delegate(client, parent, second_assignee, "task-request-2")["delegation"]["child_project_id"]
     queue(client, parent, "Continue the parent work", "parent-request-1")
     running, active = set(), set()
     all_started = asyncio.Event()
@@ -448,5 +456,219 @@ async def test_parent_attachment_references_reject_symlink_escape(collaboration_
         await finish(coordinator)
         assert len(seen) == 1
         assert seen[0].project_id == task["child_project_id"]
+    finally:
+        await coordinator.close()
+
+
+def focused_brief(request):
+    return json.loads(request.prompt.split("Focused task brief (JSON):\n", 1)[1].split(
+        "\n\nCurrent collaborator message:\n", 1
+    )[0])
+
+
+@pytest.mark.asyncio
+async def test_repeated_member_requests_and_retry_keep_their_exact_briefs(collaboration_app):
+    app, client, parent, _, assignee = collaboration_app
+    store = app.state.store
+    first = delegate(client, parent, assignee, content="FIRST instructions", context="FIRST context")
+    second = delegate(client, parent, assignee, "task-request-2", content="SECOND instructions", context="SECOND context")
+    child = first["delegation"]["child_project_id"]
+    assert second["delegation"]["child_project_id"] == child
+    assert second["delegation"]["id"] == first["delegation"]["id"]
+    assert second["turn"]["id"] != first["turn"]["id"]
+    calls = []
+
+    async def runner(request, emit, cancel):
+        brief = focused_brief(request)
+        calls.append((request, brief))
+        await emit("session", {"session_id": "member-session"})
+        if len(calls) == 1:
+            raise RuntimeError("First attempt failed after binding")
+        return RunResult("member-session", "Completed " + brief["instructions"])
+
+    coordinator = Coordinator(store, runner)
+    await coordinator.start()
+    try:
+        await finish(coordinator)
+        assert len(calls) == 1
+        assert calls[0][1]["instructions"] == "FIRST instructions"
+        retry = client.post(f"/api/projects/{child}/turns/{first['turn']['id']}/retry", json={
+            "client_id": "retry-first-request",
+        })
+        assert retry.status_code == 201, retry.text
+        coordinator.kick(child)
+        await finish(coordinator)
+        queue(client, child, "Follow up on the most recent assignment")
+        coordinator.kick(child)
+        await finish(coordinator)
+        assert [brief["instructions"] for _, brief in calls] == [
+            "FIRST instructions", "SECOND instructions", "FIRST instructions", "SECOND instructions",
+        ]
+        assert [brief["context"] for _, brief in calls] == [
+            "FIRST context", "SECOND context", "FIRST context", "SECOND context",
+        ]
+        assert [request.session_id for request, _ in calls] == [None] + ["member-session"] * 3
+        assert {brief["task_id"] for _, brief in calls} == {first["delegation"]["id"]}
+        assert rows(store, "SELECT id FROM turns WHERE project_id=?", (parent,)) == []
+    finally:
+        await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_new_task_reuses_member_session_without_overwriting_old_results_or_merge(collaboration_app):
+    app, client, parent, _, assignee = collaboration_app
+    store = app.state.store
+    first = delegate(client, parent, assignee, content="FIRST task instructions")["delegation"]
+    child = first["child_project_id"]
+    calls = []
+    old_output = store.workspace(child) / "tasks" / first["id"] / "result.txt"
+
+    async def runner(request, emit, cancel):
+        calls.append(request)
+        if request.project_id == parent:
+            assert request.session_id == "parent-session"
+            assert "FIRST verified result" in request.prompt
+            assert "SECOND task instructions" not in request.prompt
+            return RunResult("parent-session", "Integrated the first task")
+        brief = focused_brief(request)
+        output = request.workspace / brief["output_directory"] / "result.txt"
+        assert output.parent.is_dir()
+        await emit("session", {"session_id": "persistent-member-session"})
+        if brief["task_id"] == first["id"]:
+            output.write_text("FIRST result must remain unchanged")
+            return RunResult("persistent-member-session", f"FIRST verified result [file]({brief['output_directory']}/result.txt)")
+        assert request.session_id == "persistent-member-session"
+        assert brief["instructions"] == "SECOND task instructions"
+        assert old_output.read_text() == "FIRST result must remain unchanged"
+        output.write_text("SECOND result in its own task directory")
+        return RunResult("persistent-member-session", f"SECOND verified result [file]({brief['output_directory']}/result.txt)")
+
+    coordinator = Coordinator(store, runner)
+    await coordinator.start()
+    try:
+        await finish(coordinator)
+        merge = client.post(f"/api/projects/{parent}/delegations/{first['id']}/merge", json={
+            "client_id": "merge-first-result",
+        })
+        assert merge.status_code == 200, merge.text
+        second = delegate(client, parent, assignee, "new-task-request-2", content="SECOND task instructions")["delegation"]
+        assert second["id"] != first["id"]
+        assert second["child_project_id"] == child
+        coordinator.kick(child)
+        coordinator.kick(parent)
+        await finish(coordinator)
+        assert old_output.read_text() == "FIRST result must remain unchanged"
+        assert (store.workspace(child) / "tasks" / second["id"] / "result.txt").read_text() == "SECOND result in its own task directory"
+        states = {row["id"]: row for row in rows(store, "SELECT * FROM delegations WHERE child_project_id=?", (child,))}
+        assert states[first["id"]]["merge_turn_id"] == merge.json()["turn"]["id"]
+        assert states[second["id"]]["merge_turn_id"] is None
+        events = [json.loads(row["payload"])["delegation"] for row in rows(
+            store, "SELECT payload FROM events WHERE project_id=? AND type='delegation.updated' ORDER BY id", (parent,)
+        )]
+        first_events = [event for event in events if event["id"] == first["id"]]
+        assert first_events[-1]["merge_turn"]["status"] == "complete"
+        assert all(event["merge_turn"] is None for event in events if event["id"] == second["id"])
+        child_calls = [request for request in calls if request.project_id == child]
+        assert [request.session_id for request in child_calls] == [None, "persistent-member-session"]
+    finally:
+        await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_old_task_stops_before_a_new_task_reuses_the_member_session(collaboration_app):
+    app, client, parent, _, assignee = collaboration_app
+    store = app.state.store
+    first = delegate(client, parent, assignee, content="Old task")
+    child = first["delegation"]["child_project_id"]
+    queue(client, child, "Old queued followup")
+    started = asyncio.Event()
+    calls = []
+
+    async def runner(request, emit, cancel):
+        brief = focused_brief(request)
+        calls.append(brief)
+        await emit("session", {"session_id": "member-session"})
+        if brief["task_id"] == first["delegation"]["id"]:
+            started.set()
+            await asyncio.wait_for(cancel.wait(), timeout=3)
+            return RunResult("member-session", "Old task cancelled", "cancelled")
+        assert request.session_id == "member-session"
+        return RunResult("member-session", "New task completed")
+
+    coordinator = Coordinator(store, runner)
+    await coordinator.start()
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        # Do not set the coordinator's cancellation event: the worker must notice
+        # closure itself. A new task cannot race the old task's native shutdown.
+        with store.connect() as c:
+            c.execute("UPDATE delegations SET status='cancelled' WHERE id=?", (first["delegation"]["id"],))
+        blocked = client.post(f"/api/projects/{parent}/delegations", json={
+            "content": "New task", "assignee_ids": [assignee["id"]],
+            "client_id": "new-task-request-2",
+        })
+        assert blocked.status_code == 409, blocked.text
+        await finish(coordinator)
+        second = delegate(client, parent, assignee, "new-task-request-2", content="New task")
+        assert second["delegation"]["child_project_id"] == child
+        coordinator.kick(child)
+        await finish(coordinator)
+        assert [brief["instructions"] for brief in calls] == ["Old task", "New task"]
+        turns = rows(store, "SELECT status FROM turns WHERE project_id=? ORDER BY created_at,id", (child,))
+        assert [turn["status"] for turn in turns] == ["cancelled", "cancelled", "complete"]
+        retry = client.post(f"/api/projects/{child}/turns/{first['turn']['id']}/retry", json={
+            "client_id": "must-not-retry-old",
+        })
+        assert retry.status_code == 409, retry.text
+    finally:
+        await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_unmapped_child_turn_does_not_inherit_the_latest_task(collaboration_app):
+    app, client, parent, _, assignee = collaboration_app
+    store = app.state.store
+    first = delegate(client, parent, assignee)
+    child = first["delegation"]["child_project_id"]
+    with store.connect() as c:
+        c.execute("DELETE FROM delegation_turns WHERE turn_id=?", (first["turn"]["id"],))
+    calls = []
+
+    async def runner(*args):
+        calls.append(args)
+        return RunResult("unexpected-session", "Unexpected execution")
+
+    coordinator = Coordinator(store, runner)
+    await coordinator.start()
+    try:
+        await finish(coordinator)
+        assert calls == []
+        assert rows(store, "SELECT status FROM turns WHERE project_id=?", (child,)) == [{"status": "cancelled"}]
+    finally:
+        await coordinator.close()
+
+
+@pytest.mark.asyncio
+async def test_task_output_symlink_fails_before_inference(collaboration_app, tmp_path):
+    app, client, parent, _, assignee = collaboration_app
+    store = app.state.store
+    task = delegate(client, parent, assignee)["delegation"]
+    child = task["child_project_id"]
+    outside = tmp_path / "outside-output"
+    outside.mkdir()
+    (store.workspace(child) / "tasks").symlink_to(outside, target_is_directory=True)
+    calls = []
+
+    async def runner(*args):
+        calls.append(args)
+        return RunResult("unexpected-session", "Unexpected execution")
+
+    coordinator = Coordinator(store, runner)
+    await coordinator.start()
+    try:
+        await finish(coordinator)
+        assert calls == []
+        assert rows(store, "SELECT status FROM turns WHERE project_id=?", (child,)) == [{"status": "failed"}]
+        assert list(outside.iterdir()) == []
     finally:
         await coordinator.close()

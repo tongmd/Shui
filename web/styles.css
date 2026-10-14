@@ -85,3 +85,9 @@
 #child-session-context-body>p{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8;margin:0}
 
 .delegation-current{display:block;font-size:10px;color:var(--muted);margin-top:10px}
+
+.assignment-source{font-size:9px;color:var(--muted);white-space:nowrap}.assignment-chip.invalid{border-color:#dbafa6;color:var(--red);background:#fff6f3}
+
+.delegation-request-brief{margin-top:10px;padding:9px 11px;border:1px solid #dce5df;border-radius:7px;background:#f7faf8;font-size:11px;color:var(--muted)}
+.delegation-request-brief>summary{cursor:pointer;line-height:1.7}
+.delegation-request-context{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink);font-size:12px;line-height:1.8;margin:10px 0 0}

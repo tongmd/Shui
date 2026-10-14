@@ -12,10 +12,16 @@ and an ordered task queue. Each message records its author. Every collaborator
 continues the project's existing native agent conversation. Projects run in
 parallel; turns within a project run in order.
 
-To delegate, type **@** in the main conversation, choose project members, and
-send the assignment. Shui opens the independent collaboration session in a
+To delegate, type **@** in the main conversation and choose project members,
+or write a complete project username directly, including Chinese sentences
+such as `跟@memberli看一看这个方案`. Shui shows the matched members and changes
+the send button to **分派任务** before submission. Usernames must match current
+project members; email addresses, URLs, escaped mentions, and code do not assign
+tasks. The original message text is preserved. Shui opens the collaboration session in a
 separate browser window, keeping the main conversation in its original window.
-The assigned people and a dedicated agent can discuss and work there.
+Each member has one dedicated collaboration session per project. Later tasks
+mentioning the same member return to that session and reuse its native agent
+history. Mentioning multiple members sends work to each member's own session.
 Every current project member can view that session from its task card or the
 **Tasks** panel. The main agent keeps its own conversation; child dialogue is
 not appended to its context. Add optional focused background when assigning.
@@ -25,11 +31,12 @@ result summary, and submit it. The summary and artifact references enter the
 main agent's queue for integration. The original main window receives the
 result live, and the child window keeps the completed transcript open.
 Each window has its own shareable session URL and restores the same session
-on refresh. If the browser blocks a new window, use **在新窗口打开** on the
+on refresh. If the browser blocks a new window, use **打开协作窗口** on the
 task card to open it explicitly.
-Each task uses its own workspace and native session; later child messages
-resume that same session. Child agents are instructed to treat parent files
-as read-only references and place proposed changes in their own workspace.
+Each member's collaboration uses its own workspace and native session. A new
+task after completion uses the same session, preserving earlier discussion and
+submitted summaries. Child agents are instructed to treat parent files as
+read-only references and place each task's proposed changes in its task folder.
 As with other Shui agents, this is not an operating-system sandbox.
 
 Paste text or screenshots into the message box with **Ctrl+V** (**Command+V**

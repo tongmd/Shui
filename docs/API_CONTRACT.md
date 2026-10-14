@@ -61,15 +61,19 @@ The project detail response also includes an `insights` aggregate, and `GET /api
 
 ## Collaboration tasks
 
-Project editors and owners can assign one task to up to eight active project
-editors/owners. A parent can have at most eight open tasks. Each task owns one
-child project, workspace, FIFO queue, and fresh native conversation. Tasks
-cannot be nested; externally bridged projects cannot delegate.
+Project editors and owners can assign work to up to eight active project
+editors/owners. Each parent/member pair has one durable child project,
+workspace, FIFO queue, and native conversation. Repeated assignments to that
+member append work to the current open task. After completion or cancellation,
+a new task record reuses the same child session and native history; earlier
+summaries and integration attempts remain associated with their original task.
+A parent can have at most eight open tasks. Tasks cannot be nested; externally
+bridged projects cannot delegate.
 
-- `GET /api/projects/{parent}/delegations` -> `{delegations:[Delegation],assignable_members:[Member]}`.
-- `POST /api/projects/{parent}/delegations {content,title?,context?,assignee_ids:[id],attachment_ids:[],client_id}` -> `{delegation,message,turn}` (201). Atomically creates a parent task-card message and initial child turn. Does not enqueue a parent turn. Retries with the same creator/client ID return the existing task. Plain text mentions in the ordinary message API do not assign work.
+- `GET /api/projects/{parent}/delegations` -> `{delegations:[Delegation],assignable_members:[Member],sessions:[{parent_project_id,assignee_id,child_project_id,created_at,delegation}]}`. Sessions contain each member's current task; delegations also retains past tasks.
+- `POST /api/projects/{parent}/delegations {content,title?,context?,assignee_ids:[id],attachment_ids:[],client_id}` -> `{delegation,message,turn,assignments:[{delegation,message,turn}]}` (201). Atomically appends one child turn and parent task-card message per assignee, creating the member's session only when needed. Top-level fields identify the first assignment for compatibility. Does not enqueue a parent turn. Retries with the same creator/client ID return the original assignment batch. Plain text mentions in the ordinary message API do not assign work.
 - `GET /api/projects/{parent}/delegations/{id}` -> `{delegation}`.
-- `POST /api/projects/{parent}/delegations/{id}/merge {summary?,client_id}` -> `{delegation,message,turn}`. Requires the child queue to be idle. Uses the supplied summary or the last completed assistant response, bounded to 12,000 characters, plus workspace/artifact references. Atomically closes the child and enqueues one parent integration turn; repeated submission returns that turn. Failure/retry follows the normal explicit turn API and updates the task's integration status.
+- `POST /api/projects/{parent}/delegations/{id}/merge {summary?,client_id}` -> `{delegation,message,turn}`. Requires the child queue to be idle. Uses the supplied summary or the last completed assistant response belonging to that task, bounded to 12,000 characters, plus workspace/artifact references. Atomically closes the task and enqueues one parent integration turn; repeated submission returns that turn. Failure/retry follows the normal explicit turn API and updates that task's integration status even if a newer task has since opened in the child.
 - `POST /api/projects/{parent}/delegations/{id}/cancel` -> `{delegation}`. Closes the task and cancels its queued/running child work, preserving the transcript.
 
 `Delegation` includes `id,parent_project_id,child_project_id,parent_project_name,
@@ -82,18 +86,22 @@ specific and is omitted from shared events.
 
 Existing project detail, message, file, workspace, research, and event APIs
 also work for the child ID. Child project details add `parent_project_id` and
-`delegation`; parent card messages add `delegation`. Integration messages add
+`delegation`; parent card messages add `delegation` and `delegation_request`,
+which identifies the individual assignment and preserves its title/content.
+Integration messages add
 `merge_delegation`, including in their first creation event, so the UI displays
 and copies the result summary while the runner receives its execution context.
 Valid local artifact links in the submitted summary are bound to their source
 project; missing or unsafe local links become plain text. Child read access follows
 current parent membership dynamically. Only the task creator, assignees, and
 parent owner with current editing rights can write, complete, or cancel it.
-Closed tasks are read-only. Membership/settings are managed on the parent;
+Closed tasks remain read-only; a subsequent assignment opens a new task in the
+same child conversation. Membership/settings are managed on the parent;
 deleting the parent stops and deletes its child tasks too.
 
 Parent `delegation.created` and `delegation.updated` events carry task metadata,
-progress, and the submitted summary. Child dialogue and native tool events stay
+progress, and the submitted summary. Task updates also refresh the existing
+child window when new work opens there. Child dialogue and native tool events stay
 on the child event channel. Native histories are neither copied nor forked.
 
 The browser opens child sessions in separate windows using
@@ -103,6 +111,13 @@ storage. Opening or refreshing a child does not navigate the parent window.
 These links contain no credentials and retain the normal login and membership
 checks. Submitting a summary leaves the child window open in read-only mode;
 the parent receives the integration turn through its existing event stream.
+Windows have stable parent/member names. Opening a later assignment focuses
+the existing window without reloading it or losing unsent discussion drafts.
+The composer resolves complete known project usernames in typed mentions,
+including mentions adjacent to Chinese text, and submits them through the
+delegation endpoint. It displays resolved recipients before sending. Email,
+URL, code, and escaped `@` text remain ordinary text. While the member list is
+unavailable, mention-bearing drafts cannot silently fall back to a normal turn.
 
 ## Adapter interface (`shui/agents.py`)
 

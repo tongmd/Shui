@@ -4,15 +4,19 @@
 
 The implementation targets the locally inspected Codex 0.153.4 app-server schema and Claude Code 2.1.261 print interface. Provider discovery reports only whether an executable is installed. It does not claim that credentials, quota, models, or service connectivity work.
 
-Collaboration tasks allocate a new child project and native conversation. The
-first turn starts a fresh native thread; subsequent messages from the assigned
-humans resume that child thread. Parent and child use separate workspace and
+Each parent/member pair owns one child project and native conversation. Its
+first assignment starts a fresh native thread; later assignments and messages
+resume that child thread, including after a previous task was completed.
+Each turn records its exact task and assignment brief, so retrying a turn or
+integrating an older result cannot pick up a newer task's context.
+Parent and child use separate workspace and
 session locks and can run concurrently. A focused task brief supplies the
 assignment, optional background, selected attachment references, and parent
 resource links. It never copies or forks the parent's transcript/native history.
 
 Child agents receive instructions to read parent resources only as needed and
-write proposals in their own workspace. This is a task constraint under the
+write new proposals under `tasks/{delegation_id}/` in their persistent workspace,
+preserving earlier task deliverables. This is a task constraint under the
 existing full-access execution model, not a new filesystem security boundary.
 The parent receives task status events without child dialogue. Only an explicit
 completion request sends a bounded result summary and artifact references to
