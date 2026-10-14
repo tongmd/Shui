@@ -246,6 +246,43 @@ async def test_codex_handshake_stream_and_resume(fake_cli, monkeypatch, compact_
     assert not any("fork" in r["method"] for r in calls)
 
 
+@pytest.mark.parametrize("project_model,environment_model,expected", [
+    (None, None, "gpt-6.1-sol"),
+    (None, "environment-model", "environment-model"),
+    ("project-model", "environment-model", "project-model"),
+])
+async def test_codex_model_default_and_overrides_reach_new_and_resumed_turns(
+    fake_cli, monkeypatch, project_model, environment_model, expected
+):
+    workspace, capture = fake_cli
+    if environment_model is None:
+        monkeypatch.delenv("SHUI_CODEX_MODEL", raising=False)
+    else:
+        monkeypatch.setenv("SHUI_CODEX_MODEL", environment_model)
+
+    async def emit(kind, payload):
+        pass
+
+    session_id = None
+    for _ in range(2):
+        result = await run_agent(
+            RunRequest("codex", workspace, "Use the configured model", session_id, project_model),
+            emit,
+            asyncio.Event(),
+        )
+        assert result.session_id == "codex-native-1"
+        session_id = result.session_id
+    calls = [row for row in records(capture) if row.get("method") in {
+        "thread/start", "thread/resume", "turn/start",
+    }]
+    assert [call["method"] for call in calls] == [
+        "thread/start", "turn/start", "thread/resume", "turn/start",
+    ]
+    assert all(call["params"]["model"] == expected for call in calls)
+    assert calls[2]["params"]["threadId"] == "codex-native-1"
+    assert all(call["params"]["threadId"] == "codex-native-1" for call in calls if call["method"] == "turn/start")
+
+
 @pytest.mark.parametrize("session_id", [None, "existing-thread"])
 @pytest.mark.parametrize("compact_limit", ["", "0", "-1", "1.5", "nan", "1e5", "invalid"])
 async def test_codex_invalid_compaction_limit_fails_before_launch(

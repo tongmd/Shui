@@ -638,7 +638,7 @@ async def _rpc(run: _Run, method: str, params: dict) -> dict:
 
 
 async def _codex(run: _Run, binary: str) -> None:
-    model = run.request.model or os.environ.get("SHUI_CODEX_MODEL") or "gpt-5.6-sol"
+    model = run.request.model or os.environ.get("SHUI_CODEX_MODEL") or "gpt-6.1-sol"
     auto_compact_token_limit = _positive_integer(
         "SHUI_CODEX_AUTO_COMPACT_TOKEN_LIMIT", 200000
     )

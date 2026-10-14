@@ -139,7 +139,7 @@ documents the settings; Shui does not automatically load `.env` files.
 | `SHUI_PORT` | `18940` | Web port |
 | `SHUI_PUBLIC_ORIGIN` | `http://127.0.0.1:18940` | Exact browser origin, including scheme and port |
 | `SHUI_PROXY_URL` | `http://127.0.0.1:7890` with `shui serve` | Required proxy for agent child processes |
-| `SHUI_CODEX_MODEL` | `gpt-5.6-sol` | Default Codex model; project settings take precedence |
+| `SHUI_CODEX_MODEL` | `gpt-6.1-sol` | Default Codex model; project settings take precedence |
 | `SHUI_CODEX_AUTO_COMPACT_TOKEN_LIMIT` | `200000` | Positive integer native compaction threshold, passed explicitly on thread start/resume |
 | `SHUI_CODEX_BIN` | `codex` | Executable name or absolute path |
 | `SHUI_CLAUDE_BIN` | `claude` | Executable name or absolute path |
