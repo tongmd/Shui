@@ -92,18 +92,43 @@
   }
   function setConnection(mode, text) { state.liveConnected = mode === 'connected'; const cls = `connection ${mode}`; if ($('connection').className !== cls) $('connection').className = cls; if ($('connection-text').textContent !== text) $('connection-text').textContent = text; }
   function connectionHealth() {
-    if (state.connectionHealth?.epoch !== state.epoch) state.connectionHealth = { epoch: state.epoch, startedAt: Date.now(), sseOpen: false, lastSseSuccess: 0, lastPollSuccess: 0, lastPollAttempt: 0, pollFailures: 0, backlog: false };
+    if (state.connectionHealth?.epoch !== state.epoch) state.connectionHealth = { epoch: state.epoch, startedAt: Date.now(), sseOpen: false, sseStartedAt: 0, lastSseSuccess: 0, lastPollSuccess: 0, lastPollAttempt: 0, lastActivity: 0, pollFailures: 0, backlog: false };
     return state.connectionHealth;
   }
+  function eventTransport(hostname = location.hostname) {
+    const host = hostname.toLowerCase().replace(/\.$/, '');
+    // Cloudflare Quick Tunnels buffer SSE; short event batches are supported.
+    return host === 'trycloudflare.com' || host.endsWith('.trycloudflare.com') ? 'poll' : 'sse';
+  }
+  function sseIsFresh(health, now = Date.now()) { return health.sseOpen && health.lastSseSuccess > 0 && now - health.lastSseSuccess < 30000; }
   function connectionPresentation(health, now = Date.now(), online = true) {
     if (!online) return { mode: 'reconnecting', text: '等待网络恢复' };
-    if (health.sseOpen) return { mode: 'connected', text: '实时同步' };
+    if (sseIsFresh(health, now)) return { mode: 'connected', text: '实时同步' };
     if ((health.lastPollSuccess && now - health.lastPollSuccess < 30000) || (health.lastSseSuccess && now - health.lastSseSuccess < 30000)) return { mode: 'connected', text: '同步正常' };
     return { mode: 'reconnecting', text: now - health.startedAt < 30000 ? '正在连接' : '正在重新连接' };
   }
   function renderConnectionHealth() { const presentation = connectionPresentation(connectionHealth(), Date.now(), navigator.onLine !== false); setConnection(presentation.mode, presentation.text); }
   function pollRetryDelay(failures) { return Math.min(30000, 5000 * (2 ** Math.min(Number(failures) || 0, 3))); }
-  function stopEvents() { if (state.messageRenderFrame != null) cancelAnimationFrame(state.messageRenderFrame); state.messageRenderFrame = null; state.messageRenderIds?.clear(); state.insightObserver?.disconnect(); state.insightObserver = null; if (state.source) state.source.close(); state.source = null; clearTimeout(state.pollTimer); state.pollTimer = null; clearTimeout(state.reconnectTimer); state.reconnectTimer = null; clearTimeout(state.metaTimer); state.metaTimer = null; clearTimeout(state.insightTimer); state.insightTimer = null; clearInterval(state.heartbeat); state.heartbeat = null; }
+  function pollInterval(health) {
+    if (health.pollFailures) return pollRetryDelay(health.pollFailures);
+    if (sseIsFresh(health)) return 30000;
+    return activeStatuses.has(state.project?.status) || activeStatuses.has(state.project?.active_turn?.status) || Date.now() - health.lastActivity < 10000 ? 2000 : 5000;
+  }
+  function pauseLiveSync() {
+    if (state.source) state.source.close(); state.source = null; connectionHealth().sseOpen = false;
+    clearTimeout(state.pollTimer); state.pollTimer = null; clearTimeout(state.reconnectTimer); state.reconnectTimer = null;
+    const request = state.pollRequest; state.pollRequest = null; request?.controller.abort();
+    clearInterval(state.heartbeat); state.heartbeat = null;
+  }
+  function resumeLiveSync() {
+    if (!state.project || !state.user || document.hidden || navigator.onLine === false) return;
+    const health = connectionHealth(); health.startedAt = Date.now(); health.lastPollAttempt = 0; health.pollFailures = 0;
+    if (!state.source) connectEvents(state.epoch);
+    pollEvents(state.epoch); renderConnectionHealth(); heartbeat(state.epoch);
+    if (!state.heartbeat) state.heartbeat = setInterval(() => heartbeat(state.epoch), 25000);
+    refreshProjectMetaSoon();
+  }
+  function stopEvents() { if (state.messageRenderFrame != null) cancelAnimationFrame(state.messageRenderFrame); state.messageRenderFrame = null; state.messageRenderIds?.clear(); state.insightObserver?.disconnect(); state.insightObserver = null; pauseLiveSync(); clearTimeout(state.metaTimer); state.metaTimer = null; clearTimeout(state.insightTimer); state.insightTimer = null; }
   function clearProjectView() {
     closePendingTaskWindow();
     stopEvents(); state.epoch++; state.project = null; state.projectLoading = false; state.messages.clear(); state.turns.clear(); state.tools.clear(); state.files = []; state.members = []; state.presence = []; state.activity = []; state.activityLoaded = false; state.insights = null; state.renderedInsights = null; state.insightsNeedsRefresh = true; state.insightRevision = 0; state.attachments = []; state.uploading = 0; state.sending = false; state.pendingSend = null; state.workspacePath = ''; state.cursor = 0; state.historyMore = true; state.loadingHistory = false;
@@ -822,7 +847,7 @@
   function activityDescription(event) { const p = event.payload || {}; const author = p.message?.author || p.user || p.author; const who = author ? name(author) : ''; const type = event.type; if (type === 'delegation.created') return '分派了一项协作任务'; if (type === 'delegation.updated') return `协作任务${p.delegation ? delegationStatus(p.delegation) : '已更新'}`; if (type === 'message.created') return `${who || (p.message?.role === 'assistant' ? providerNames[state.project?.provider] || '助手' : '成员')} ${p.message?.role === 'assistant' ? '开始回复' : '加入了一条讨论'}`; if (type === 'message.updated') return '更新了一条讨论'; if (type === 'turn.updated') return `研究任务${labels[p.turn?.status] || '已更新'}`; if (type === 'file.created') return `上传了 ${p.file?.name || '一个文件'}`; if (type === 'member.updated') return '项目成员已更新'; if (type === 'project.updated') return '项目设置已更新'; if (type === 'agent.tool') return `${p.name || '工具'} · ${labels[p.status] || p.status || '运行中'}`; return '工作空间已更新'; }
   function renderActivity() { const list = state.activity.filter(e => !['presence', 'agent.delta', 'message.updated'].includes(e.type)).slice(-70).reverse(); $('activity-list').replaceChildren(); if (!list.length) $('activity-list').append(el('p', 'empty-small', '研究的每一步，会在这里留下记录。')); list.forEach(e => { const row = el('div', 'activity-entry'); const mark = el('span', 'activity-icon'); mark.append(icon(e.type === 'file.created' ? 'paper' : e.type === 'member.updated' ? 'users' : e.type === 'turn.updated' ? 'check' : e.type === 'agent.tool' ? 'tool' : 'notebook')); const info = el('div'); info.append(el('p', '', activityDescription(e)), el('small', '', when(e.created_at))); row.append(mark, info); $('activity-list').append(row); }); }
   async function loadActivity() { if (!state.project) return; const epoch = state.epoch; try { const d = await api(projectAPI('/activity?after=0')); if (epoch !== state.epoch) return; const merged = new Map(state.activity.map(e => [String(e.id), e])); (d.events || []).forEach(e => merged.set(String(e.id), e)); state.activity = [...merged.values()].sort((a, b) => Number(a.id) - Number(b.id)).slice(-300); state.activityLoaded = true; renderActivity(); } catch (err) { if (epoch === state.epoch) $('activity-list').replaceChildren(el('p', 'empty-small', err.message), button('重试', 'quiet-btn', loadActivity, 'refresh')); } }
-  async function heartbeat(epoch) { if (epoch !== state.epoch || !state.project || document.hidden) return; const pid = state.project.id; try { await api(projectAPI('/presence', pid), { method: 'POST', body: {}, signal: AbortSignal.timeout(20000) }); } catch (err) { if (epoch === state.epoch && (err.status === 404 || err.status === 403)) await projectUnavailable(pid); } }
+  async function heartbeat(epoch) { if (epoch !== state.epoch || !state.project || document.hidden || navigator.onLine === false) return; const pid = state.project.id; try { await api(projectAPI('/presence', pid), { method: 'POST', body: {}, signal: AbortSignal.timeout(20000) }); } catch (err) { if (epoch === state.epoch && (err.status === 404 || err.status === 403)) await projectUnavailable(pid); } }
   function acceptEvent(event) {
     const id = Number(event.id) || 0;
     if (id && id <= state.cursor) return;
@@ -830,42 +855,59 @@
     applyEvent(event);
   }
   async function pollEvents(epoch) {
-    if (epoch !== state.epoch || !state.project || !state.user) return;
-    let delay = 5000; const pid = state.project.id; const health = connectionHealth();
+    if (epoch !== state.epoch || !state.project || !state.user || document.hidden || navigator.onLine === false || state.pollRequest?.epoch === epoch) return;
+    clearTimeout(state.pollTimer); state.pollTimer = null;
+    const pid = state.project.id; const health = connectionHealth();
+    const request = { epoch, controller: new AbortController() }; state.pollRequest = request;
+    let delay = 5000; let timeout;
     try {
-      if (!document.hidden && navigator.onLine !== false) {
-        const interval = health.sseOpen ? 30000 : pollRetryDelay(health.pollFailures);
-        if (health.backlog || !health.lastPollAttempt || Date.now() - health.lastPollAttempt >= interval) {
-          health.lastPollAttempt = Date.now();
-          const result = await api(projectAPI(`/event-batch?after=${state.cursor}`), { signal: AbortSignal.timeout(20000) });
-          if (epoch !== state.epoch) return;
-          (result.events || []).forEach(acceptEvent); health.lastPollSuccess = Date.now(); health.pollFailures = 0; health.backlog = result.events?.length === 200;
-          if (health.backlog) delay = 50;
-        }
-        if (Date.now() - (state.lastMetaPoll || 0) > 10000) { state.lastMetaPoll = Date.now(); refreshProjectMetaSoon(); }
-      }
+      if (state.source && Date.now() - (health.lastSseSuccess || health.sseStartedAt) >= 35000) retryEvents(epoch, state.source);
+      const interval = pollInterval(health); const elapsed = Date.now() - health.lastPollAttempt;
+      if (health.backlog || !health.lastPollAttempt || elapsed >= interval) {
+        health.lastPollAttempt = Date.now(); timeout = setTimeout(() => request.controller.abort(), 20000);
+        const result = await api(projectAPI(`/event-batch?after=${state.cursor}`, pid), { signal: request.controller.signal });
+        if (epoch !== state.epoch || state.pollRequest !== request) return;
+        const events = result.events || [];
+        events.forEach(acceptEvent); health.lastPollSuccess = Date.now(); health.lastPollAttempt = Date.now(); health.pollFailures = 0; health.backlog = events.length === 200;
+        if (events.some(event => event.type !== 'presence')) health.lastActivity = Date.now();
+        delay = health.backlog ? 50 : Math.min(5000, pollInterval(health));
+      } else delay = Math.min(5000, Math.max(100, interval - elapsed));
+      if (Date.now() - (state.lastMetaPoll || 0) > 10000) { state.lastMetaPoll = Date.now(); refreshProjectMetaSoon(); }
     } catch (err) {
-      if (epoch === state.epoch && (err.status === 404 || err.status === 403)) { await projectUnavailable(pid); return; }
-      if (epoch === state.epoch) { health.pollFailures++; health.backlog = false; health.lastPollAttempt = Date.now(); delay = pollRetryDelay(health.pollFailures); }
+      if (epoch !== state.epoch || state.pollRequest !== request) return;
+      if (err.status === 404 || err.status === 403) { await projectUnavailable(pid); return; }
+      health.pollFailures++; health.backlog = false; health.lastPollAttempt = Date.now(); delay = pollRetryDelay(health.pollFailures);
     } finally {
-      if (epoch === state.epoch && state.user && state.project) { renderConnectionHealth(); state.pollTimer = setTimeout(() => pollEvents(epoch), delay); }
+      clearTimeout(timeout);
+      if (state.pollRequest === request) {
+        state.pollRequest = null;
+        if (epoch === state.epoch && state.user && state.project && !document.hidden && navigator.onLine !== false) {
+          renderConnectionHealth(); state.pollTimer = setTimeout(() => pollEvents(epoch), delay);
+        }
+      }
+    }
+  }
+  function retryEvents(epoch, source) {
+    if (epoch !== state.epoch || state.source !== source) return;
+    source.close(); state.source = null; connectionHealth().sseOpen = false; renderConnectionHealth(); clearTimeout(state.reconnectTimer);
+    if (eventTransport() === 'sse' && !document.hidden && navigator.onLine !== false) {
+      state.reconnectTimer = setTimeout(() => connectEvents(epoch), state.reconnectDelay); state.reconnectDelay = Math.min(30000, state.reconnectDelay * 2);
     }
   }
   function connectEvents(epoch) {
     if (epoch !== state.epoch || !state.project || !state.user || document.hidden || navigator.onLine === false) return;
-    if (state.source) state.source.close(); const health = connectionHealth(); health.sseOpen = false;
+    clearTimeout(state.reconnectTimer); state.reconnectTimer = null;
+    if (state.source) state.source.close(); state.source = null; const health = connectionHealth(); health.sseOpen = false;
+    if (eventTransport() === 'poll') return;
+    health.sseStartedAt = Date.now(); health.lastSseSuccess = 0;
     const source = new EventSource(`/api${projectAPI(`/events?after=${state.cursor}`)}`, { withCredentials: true }); state.source = source;
     const alive = () => { if (epoch !== state.epoch || state.source !== source) return; health.sseOpen = true; health.lastSseSuccess = Date.now(); state.reconnectDelay = 3000; renderConnectionHealth(); };
-    source.onopen = alive;
-    // Transport heartbeat has no event ID and must never advance the business cursor.
+    source.onopen = () => { if (epoch !== state.epoch || state.source !== source) return; health.sseOpen = true; renderConnectionHealth(); };
+    // Only received frames prove the stream is live. Heartbeats never advance the cursor.
     source.addEventListener('heartbeat', alive);
     const handle = evt => { if (epoch !== state.epoch || state.source !== source) return; let event; try { event = JSON.parse(evt.data); } catch (_) { return; } alive(); acceptEvent({ ...event, id: event.id || evt.lastEventId }); };
     source.onmessage = handle; ['message.created', 'message.updated', 'turn.updated', 'agent.delta', 'agent.tool', 'project.updated', 'file.created', 'artifact.changed', 'insights.updated', 'research.updated', 'member.updated', 'presence', 'delegation.created', 'delegation.updated'].forEach(type => source.addEventListener(type, handle));
-    source.onerror = () => {
-      if (epoch !== state.epoch || !state.user || state.source !== source || document.hidden) return;
-      source.close(); state.source = null; health.sseOpen = false; renderConnectionHealth(); clearTimeout(state.reconnectTimer);
-      state.reconnectTimer = setTimeout(() => connectEvents(epoch), state.reconnectDelay); state.reconnectDelay = Math.min(30000, state.reconnectDelay * 2);
-    };
+    source.onerror = () => retryEvents(epoch, source);
   }
   function applyEvent(event) {
     const p = event.payload || {}; const type = event.type;
@@ -896,7 +938,7 @@
       field(body, '项目名称', 'new-project-name', { required: true, maxLength: 120, placeholder: '例如：InfiniteWorld' });
       field(body, '研究简介', 'new-project-description', { tag: 'textarea', maxLength: 2000, placeholder: '这篇研究希望回答什么问题？' });
       projectLinkFields(body, 'new-project'); providerChoices(body);
-      field(body, '模型（可选）', 'new-project-model', { placeholder: '默认 gpt-5.6-sol' });
+      field(body, '模型（可选）', 'new-project-model', { placeholder: '默认 gpt-6.1-sol' });
       field(body, '已有会话 ID（可选）', 'new-project-session', { placeholder: '接续已有的 Codex / Claude 会话' });
     }, async () => {
       const provider = $('dialog-form').querySelector('input[name="project-provider"]:checked')?.value;
@@ -1072,11 +1114,13 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawers(); });
   document.querySelectorAll('[data-tab]').forEach(b => { b.setAttribute('aria-controls', `panel-${b.dataset.tab}`); b.addEventListener('keydown', e => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return; e.preventDefault(); const tabs = [...document.querySelectorAll('[data-tab]')]; const index = tabs.indexOf(b); const next = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (index + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length; tabs[next].focus(); tabs[next].click(); }); });
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { if (state.source) state.source.close(); state.source = null; connectionHealth().sseOpen = false; clearTimeout(state.reconnectTimer); clearInterval(state.heartbeat); state.heartbeat = null; state.insightObserver?.disconnect(); state.insightObserver = null; }
-    else if (state.project) { connectionHealth().startedAt = Date.now(); renderConnectionHealth(); heartbeat(state.epoch); if (!state.source) connectEvents(state.epoch); if (!state.heartbeat) state.heartbeat = setInterval(() => heartbeat(state.epoch), 25000); refreshProjectMetaSoon(); if (state.tab === 'insights') renderTab(); }
+    if (document.hidden) { pauseLiveSync(); state.insightObserver?.disconnect(); state.insightObserver = null; }
+    else if (state.project) { resumeLiveSync(); if (state.tab === 'insights') renderTab(); }
   });
   window.matchMedia('(max-width:980px)').addEventListener('change', () => { if (insightsVisible()) renderTab(); });
-  window.addEventListener('online', () => { if (state.project) { const health = connectionHealth(); health.startedAt = Date.now(); health.lastPollAttempt = 0; clearTimeout(state.reconnectTimer); connectEvents(state.epoch); renderConnectionHealth(); } }); window.addEventListener('offline', () => { if (state.source) state.source.close(); state.source = null; connectionHealth().sseOpen = false; clearTimeout(state.reconnectTimer); setConnection('reconnecting', '等待网络恢复'); }); window.addEventListener('beforeunload', () => { stopEvents(); closePendingTaskWindow(); });
+  window.addEventListener('online', resumeLiveSync);
+  window.addEventListener('offline', () => { pauseLiveSync(); setConnection('reconnecting', '等待网络恢复'); });
+  window.addEventListener('beforeunload', () => { stopEvents(); closePendingTaskWindow(); });
   async function boot() {
     if (state.bootPromise) return state.bootPromise;
     if (!$('app').hidden || (!$('login-view').hidden && $('boot').hidden)) return;

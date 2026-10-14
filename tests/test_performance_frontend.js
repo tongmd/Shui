@@ -73,28 +73,86 @@ test('child metadata polling uses the small meta endpoint and never runs concurr
   const second = clock.run(); release({ project: state.project, members: [] }); await second; assert.equal(requests.length, 2); assert.equal(state.metaRequest, null); assert.equal(clock.pending.size, 0);
 });
 
-function connectionHarness() {
+function connectionHarness(hostname = 'shui.example.com') {
   let now = 100000; let response = { events: [] }; const frames = []; const requests = []; const applied = []; const statuses = []; const clock = timers(); const delays = [];
-  const state = { epoch: 1, project: { id: 'p' }, user: { id: 'u' }, cursor: 0, reconnectDelay: 3000 };
-  const h = vm.createContext({ state, document: { hidden: false }, navigator: { onLine: true }, Date: { now: () => now }, setTimeout: (fn, delay) => { delays.push(delay); return clock.setTimeout(fn); }, clearTimeout: clock.clearTimeout, AbortSignal: { timeout: ms => ({ timeoutMs: ms }) }, projectAPI: suffix => `/projects/p${suffix}`, api: async (url, options) => { requests.push({ url, options }); if (response instanceof Error) throw response; return response; }, setConnection: (mode, text) => statuses.push({ mode, text }), refreshProjectMetaSoon() {}, projectUnavailable() {}, applyEvent: event => applied.push(event.id), EventSource: class { constructor(url) { this.url = url; this.listeners = {}; frames.push(this); } addEventListener(type, callback) { this.listeners[type] = callback; } close() { this.closed = true; } } });
+  const state = { epoch: 1, project: { id: 'p', status: 'idle' }, user: { id: 'u' }, cursor: 0, reconnectDelay: 3000 };
+  const h = vm.createContext({ state, location: { hostname }, document: { hidden: false }, navigator: { onLine: true }, Date: { now: () => now }, activeStatuses: new Set(['queued', 'running', 'waiting']), setTimeout: (fn, delay) => { delays.push(delay); return clock.setTimeout(fn); }, clearTimeout: clock.clearTimeout, setInterval: () => 1, clearInterval() {}, AbortController, projectAPI: (suffix, pid = state.project.id) => `/projects/${pid}${suffix}`, api: async (url, options) => { requests.push({ url, options }); if (response instanceof Error) throw response; return response; }, heartbeat() {}, setConnection: (mode, text) => statuses.push({ mode, text }), refreshProjectMetaSoon() {}, projectUnavailable() {}, applyEvent: event => applied.push(event.id), EventSource: class { constructor(url) { this.url = url; this.listeners = {}; frames.push(this); } addEventListener(type, callback) { this.listeners[type] = callback; } close() { this.closed = true; } } });
   vm.runInContext(block('  function connectionHealth(', '  function stopEvents(') + block('  function acceptEvent(', '  function applyEvent('), h);
   return { h, state, frames, requests, applied, statuses, clock, delays, now: value => { now = value; }, response: value => { response = value; } };
 }
 
-test('SSE errors do not replace healthy polling with a reconnect warning and idle open streams stay healthy', () => {
-  const f = connectionHarness(); f.h.connectEvents(1); const source = f.frames[0]; source.onopen(); f.state.connectionHealth.lastPollSuccess = 100000;
-  source.onerror(); assert.equal(f.statuses.at(-1).text, '同步正常'); assert.equal(f.statuses.at(-1).mode, 'connected'); assert.equal(f.delays.at(-1), 3000);
-  f.state.connectionHealth.sseOpen = true; f.now(200000); f.h.renderConnectionHealth(); assert.equal(f.statuses.at(-1).text, '实时同步', 'no business messages does not mean transport failure');
+test('Quick Tunnel domains use polling without constructing SSE or reconnect timers; direct IP and named hosts retain SSE', async () => {
+  for (const host of ['trycloudflare.com', 'isle.trycloudflare.com', 'ISLE.TRYCLOUDFLARE.COM.']) {
+    const f = connectionHarness(host); assert.equal(f.h.eventTransport(), 'poll'); f.h.connectEvents(1); await f.h.pollEvents(1);
+    assert.equal(f.frames.length, 0); assert.equal(f.state.reconnectTimer, null); assert.equal(f.requests.length, 1); assert.equal(f.statuses.at(-1).text, '同步正常');
+  }
+  for (const host of ['192.0.2.10', 'localhost', 'shui.example.com', 'nottrycloudflare.com', 'trycloudflare.com.example.com']) assert.equal(connectionHarness(host).h.eventTransport(), 'sse');
+});
+
+test('SSE onopen alone is not proof of a live stream; real heartbeats stay healthy and stale open streams expire', () => {
+  const f = connectionHarness(); f.h.connectEvents(1); const source = f.frames[0]; source.onopen();
+  assert.equal(f.state.connectionHealth.lastSseSuccess, 0); assert.equal(f.statuses.at(-1).text, '正在连接');
+  source.listeners.heartbeat({ data: '{}' }); assert.equal(f.statuses.at(-1).text, '实时同步');
+  f.now(120000); source.listeners.heartbeat({ data: '{}' }); f.now(145000); f.h.renderConnectionHealth(); assert.equal(f.statuses.at(-1).text, '实时同步');
+  f.now(151000); f.h.renderConnectionHealth(); assert.equal(f.statuses.at(-1).text, '正在重新连接');
   f.h.navigator.onLine = false; f.h.renderConnectionHealth(); assert.equal(f.statuses.at(-1).text, '等待网络恢复');
 });
 
-test('only sustained failures of both channels show reconnecting; polling has twenty second timeout and backoff', async () => {
-  const f = connectionHarness(); f.response(new Error('timeout')); await f.h.pollEvents(1); assert.equal(f.requests[0].options.signal.timeoutMs, 20000); assert.equal(f.statuses.at(-1).text, '正在连接'); assert.equal(f.delays.at(-1), 10000);
+test('SSE errors do not replace healthy polling with a reconnect warning', async () => {
+  const f = connectionHarness(); f.h.connectEvents(1); await f.h.pollEvents(1); f.frames[0].onerror();
+  assert.equal(f.statuses.at(-1).text, '同步正常'); assert.equal(f.delays.at(-1), 3000);
+});
+
+test('only sustained failures show reconnecting; polling has twenty second timeout, backoff and idempotent recovery', async () => {
+  const f = connectionHarness(); f.response(new Error('timeout')); await f.h.pollEvents(1); assert.ok(f.delays.includes(20000)); assert.equal(f.requests[0].options.signal.aborted, false); assert.equal(f.statuses.at(-1).text, '正在连接'); assert.equal(f.delays.at(-1), 10000);
   f.now(131000); await f.h.pollEvents(1); assert.equal(f.statuses.at(-1).text, '正在重新连接'); assert.equal(f.delays.at(-1), 20000);
   f.now(152000); f.response({ events: [{ id: 1, type: 'message.created' }, { id: 2, type: 'message.updated' }] }); await f.h.pollEvents(1);
   assert.equal(f.statuses.at(-1).text, '同步正常'); assert.equal(f.state.connectionHealth.pollFailures, 0); assert.equal(f.state.cursor, 2); assert.deepEqual(f.applied, [1, 2]);
   f.now(158000); await f.h.pollEvents(1); assert.match(f.requests.at(-1).url, /after=2/); assert.deepEqual(f.applied, [1, 2], 'recovery replay must remain idempotent');
   assert.equal(f.h.pollRetryDelay(100), 30000);
+});
+
+test('polling adapts to active tasks and drains a full batch promptly before returning to idle cadence', async () => {
+  const f = connectionHarness('test.trycloudflare.com'); await f.h.pollEvents(1); assert.equal(f.delays.at(-1), 5000);
+  f.state.project.status = 'running'; f.now(102000); await f.h.pollEvents(1); assert.equal(f.requests.length, 2); assert.equal(f.delays.at(-1), 2000);
+  f.response({ events: Array.from({ length: 200 }, (_, i) => ({ id: i + 1, type: 'message.updated' })) }); f.now(104000); await f.h.pollEvents(1); assert.equal(f.delays.at(-1), 50);
+  f.response({ events: [{ id: 201, type: 'message.updated' }] }); f.now(104050); await f.h.pollEvents(1); assert.equal(f.state.cursor, 201); assert.match(f.requests.at(-1).url, /after=200/); assert.equal(f.delays.at(-1), 2000);
+  f.state.project.status = 'idle'; f.response({ events: [] }); f.now(120000); await f.h.pollEvents(1); assert.equal(f.delays.at(-1), 5000);
+});
+
+test('a hung poll is aborted at its deadline and releases the request for a bounded retry', async () => {
+  const f = connectionHarness(); let reject;
+  f.response(new Promise((_resolve, fail) => { reject = fail; })); const pending = f.h.pollEvents(1);
+  assert.equal(f.delays.at(-1), 20000); f.clock.run(); assert.equal(f.requests[0].options.signal.aborted, true);
+  reject(new Error('aborted')); await pending;
+  assert.equal(f.state.pollRequest, null); assert.equal(f.clock.pending.size, 1); assert.equal(f.delays.at(-1), 10000);
+});
+
+test('hidden or offline tabs stop requests; resume starts one immediate poll and ignores the cancelled response', async () => {
+  const f = connectionHarness('test.trycloudflare.com'); let release;
+  f.response(new Promise(resolve => { release = resolve; })); const first = f.h.pollEvents(1); await f.h.pollEvents(1); assert.equal(f.requests.length, 1);
+  f.h.document.hidden = true; f.h.pauseLiveSync(); assert.equal(f.requests[0].options.signal.aborted, true); await f.h.pollEvents(1); assert.equal(f.requests.length, 1);
+  f.h.document.hidden = false; f.response({ events: [{ id: 2, type: 'message.created' }] }); f.h.resumeLiveSync(); await new Promise(setImmediate);
+  assert.equal(f.requests.length, 2); assert.equal(f.state.cursor, 2); assert.equal(f.frames.length, 0);
+  release({ events: [{ id: 9, type: 'message.created' }] }); await first; assert.deepEqual(f.applied, [2]); assert.equal(f.clock.pending.size, 1, 'cancelled loop cannot create a second timer');
+  f.h.navigator.onLine = false; f.h.pauseLiveSync(); await f.h.pollEvents(1); f.h.resumeLiveSync(); assert.equal(f.requests.length, 2); assert.equal(f.clock.pending.size, 0);
+  f.h.navigator.onLine = true; f.h.resumeLiveSync(); await new Promise(setImmediate); assert.equal(f.requests.length, 3); assert.equal(f.clock.pending.size, 1);
+});
+
+test('old-project polls and SSE callbacks cannot update the next project or replace its timer', async () => {
+  const f = connectionHarness(); let release; f.h.connectEvents(1); const oldSource = f.frames[0];
+  f.response(new Promise(resolve => { release = resolve; })); const first = f.h.pollEvents(1);
+  f.h.pauseLiveSync(); f.state.epoch = 2; f.state.project = { id: 'next', status: 'idle' }; f.state.cursor = 0;
+  f.response({ events: [{ id: 1, type: 'message.created' }] }); f.h.connectEvents(2); await f.h.pollEvents(2); const nextSource = f.state.source;
+  oldSource.listeners['message.created']({ data: JSON.stringify({ id: 999, type: 'message.created' }) }); oldSource.onerror(); release({ events: [{ id: 999, type: 'message.created' }] }); await first;
+  assert.equal(f.state.source, nextSource); assert.deepEqual(f.applied, [1]); assert.equal(f.state.cursor, 1); assert.equal(f.clock.pending.size, 1); assert.match(f.requests.at(-1).url, /projects\/next\//);
+});
+
+test('stalled SSE is recycled and does not suppress fallback polling', async () => {
+  const f = connectionHarness(); f.h.connectEvents(1); const source = f.frames[0]; source.onopen(); source.listeners.heartbeat({ data: '{}' }); await f.h.pollEvents(1);
+  f.now(105000); await f.h.pollEvents(1); assert.equal(f.requests.length, 1, 'recent heartbeat permits slower backup polling');
+  f.now(131000); await f.h.pollEvents(1); assert.equal(f.requests.length, 2, 'stale open SSE must allow fallback polling');
+  f.now(136000); await f.h.pollEvents(1); assert.equal(source.closed, true); assert.equal(f.state.source, null); assert.equal(f.requests.length, 3); assert.equal(f.statuses.at(-1).text, '同步正常');
 });
 
 test('transport heartbeat updates health without advancing event cursor or replaying business events', () => {
