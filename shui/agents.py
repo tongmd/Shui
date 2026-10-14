@@ -189,7 +189,20 @@ class _Redactor:
                 ):
                     hold = n
                     break
-        return (text[:-hold], text[-hold:]) if hold else (text, "")
+        cut = len(text) - hold
+        # A pending suffix can overlap a complete secret: for "abca", holding
+        # the final "a" must not publish "abc" and later publish "a". Move
+        # the boundary before every complete match it crosses. Repeat because
+        # moving it can cross an earlier, overlapping match or another secret.
+        while cut:
+            previous = cut
+            for secret in self.values:
+                start = text.find(secret, max(0, cut - len(secret) + 1))
+                if 0 <= start < cut < start + len(secret):
+                    cut = start
+            if cut == previous:
+                break
+        return text[:cut], text[cut:]
 
 
 class _Output:

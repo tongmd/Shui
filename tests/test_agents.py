@@ -717,6 +717,46 @@ async def test_unknown_token_prefix_split_is_buffered_before_redaction():
         assert secret not in json.dumps(events)
 
 
+@pytest.mark.parametrize("secret", ["abca", "abcabc", "synthetic-private-ends-s"])
+async def test_self_overlapping_secret_never_crosses_a_published_boundary(secret):
+    for text in (secret, "Value " + secret, secret + secret, "Value " + secret + " done"):
+        partitions = [[text[:boundary], text[boundary:]] for boundary in range(len(text) + 1)]
+        partitions.append(list(text))
+        for pieces in partitions:
+            events = []
+
+            async def emit(kind, payload):
+                events.append((kind, payload))
+
+            redactor = agents._Redactor({}, (secret,))
+            out = agents._Output(emit, redactor)
+            for piece in pieces:
+                await out.append("answer", piece)
+                await out.tool("tool", "running", piece, "tool-1")
+            await out.finish()
+            await out.tool("tool", "completed", "", "tool-1")
+            assert out.text == redactor.clean(text)
+            assert secret not in out.text
+            tool_text = "".join(payload["content"] for kind, payload in events if kind == "tool")
+            assert tool_text == redactor.clean(text)
+            assert secret not in tool_text
+
+
+async def test_overlapping_different_secrets_keep_a_safe_stream_boundary():
+    secrets = ("abcdef", "defghi", "hijk")
+    text = "Value abcdefghijk done"
+    for boundary in range(len(text) + 1):
+        async def emit(kind, payload):
+            pass
+
+        redactor = agents._Redactor({}, secrets)
+        out = agents._Output(emit, redactor)
+        await out.append("answer", text[:boundary])
+        await out.append("answer", text[boundary:])
+        await out.finish()
+        assert not any(secret in out.text for secret in secrets)
+
+
 async def test_structured_tool_secret_is_redacted_before_json_encoding():
     events = []
 

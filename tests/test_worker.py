@@ -6,7 +6,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from shui.agents import RunResult
+from shui.agents import RunResult, _Output, _Redactor
 from shui.app import create_app
 from shui.worker import Coordinator
 
@@ -142,9 +142,10 @@ async def test_worker_receives_token_while_history_stays_redacted(queued_app):
 
 
 @pytest.mark.asyncio
-async def test_token_echoes_stay_private_across_turns_and_failure(queued_app):
+@pytest.mark.parametrize("secret", ["synthetic-private-token-K8zQ", "abca", "abcabc", "synthetic-private-ends-s"])
+@pytest.mark.parametrize("native_redaction", [False, True])
+async def test_token_echoes_stay_private_across_turns_and_failure(queued_app, secret, native_redaction):
     app, client, pid = queued_app
-    secret = "synthetic-private-token-K8zQ"
     store = app.state.store
     for index, content in enumerate(("Use token:" + secret, "Continue using the credential")):
         response = client.post(f"/api/projects/{pid}/messages", json={
@@ -157,8 +158,15 @@ async def test_token_echoes_stay_private_across_turns_and_failure(queued_app):
         seen.append(request)
         assert secret in request.secret_values
         await emit("session", {"session_id": "private-session"})
-        await emit("delta", {"text": "Echo " + secret[:10]})
-        await emit("delta", {"text": secret[10:] + " done"})
+        pieces = ["Echo " + secret[:10], secret[10:] + " done"]
+        if native_redaction:
+            output = _Output(emit, _Redactor({}, request.secret_values))
+            for piece in pieces:
+                await output.append("answer", piece)
+            await output.finish()
+        else:
+            for piece in pieces:
+                await emit("delta", {"text": piece})
         await emit("tool", {"name": "Tool " + secret, "status": "running", "content": secret[:10]})
         await emit("tool", {"name": "Tool " + secret, "status": "complete", "content": secret[10:]})
         await emit("status", {"text": "Using " + secret})
