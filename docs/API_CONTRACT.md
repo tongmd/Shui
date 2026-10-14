@@ -4,7 +4,7 @@ JSON API under `/api`; all errors `{detail: string}`. Auth cookies are HttpOnly;
 
 - `GET /api/session` -> `{authenticated,user:{id,username,display_name,role:'owner'|'member'},csrf,providers:[{id,name,installed}],version}`. Unauthenticated user/csrf null.
 - `POST /api/login {username,password}` same response; `POST /api/logout`.
-- `GET /api/projects` -> `{projects:[Project]}`.
+- `GET /api/projects` -> `{projects:[Project]}`. Lists top-level projects; child collaboration sessions are listed through their parent task API.
 - `POST /api/projects {name,description?,provider:'codex'|'claude',model?,native_session_id?,github_url?,overleaf_url?}` -> Project. Owner only. Workspace allocated server-side.
 - `GET /api/projects/{id}` -> `{project:Project,messages:[Message],files:[File],members:[Member],events_cursor:number}`. All shared transcript paginated separately for older content.
 - `PATCH /api/projects/{id} {name?,description?,model?,native_session_id?,github_url?,overleaf_url?}` -> Project. Owner only, session/model changes require idle project. Provider immutable. Explicit native binding must be unique, never create separate session per member.
@@ -58,6 +58,43 @@ unexpected hosts, or extra path components are rejected. These are project
 resource associations, not external membership provisioning.
 
 The project detail response also includes an `insights` aggregate, and `GET /api/projects/{id}/research` returns the same payload. `POST /api/projects/{id}/research` lets owners and editors upsert experiments, figures, claims and results. Figure paths must refer to existing image, SVG or PDF files inside the project workspace. Each item can reference an experiment in that project, and writes emit `research.updated`. Result values are stored as text to preserve their original precision.
+
+## Collaboration tasks
+
+Project editors and owners can assign one task to up to eight active project
+editors/owners. A parent can have at most eight open tasks. Each task owns one
+child project, workspace, FIFO queue, and fresh native conversation. Tasks
+cannot be nested; externally bridged projects cannot delegate.
+
+- `GET /api/projects/{parent}/delegations` -> `{delegations:[Delegation],assignable_members:[Member]}`.
+- `POST /api/projects/{parent}/delegations {content,title?,context?,assignee_ids:[id],attachment_ids:[],client_id}` -> `{delegation,message,turn}` (201). Atomically creates a parent task-card message and initial child turn. Does not enqueue a parent turn. Retries with the same creator/client ID return the existing task. Plain text mentions in the ordinary message API do not assign work.
+- `GET /api/projects/{parent}/delegations/{id}` -> `{delegation}`.
+- `POST /api/projects/{parent}/delegations/{id}/merge {summary?,client_id}` -> `{delegation,message,turn}`. Requires the child queue to be idle. Uses the supplied summary or the last completed assistant response, bounded to 12,000 characters, plus workspace/artifact references. Atomically closes the child and enqueues one parent integration turn; repeated submission returns that turn. Failure/retry follows the normal explicit turn API and updates the task's integration status.
+- `POST /api/projects/{parent}/delegations/{id}/cancel` -> `{delegation}`. Closes the task and cancels its queued/running child work, preserving the transcript.
+
+`Delegation` includes `id,parent_project_id,child_project_id,parent_project_name,
+title,instructions,context,status,created_by,creator,assignees,created_at,
+updated_at,completed_at,summary,merge_turn_id,merge_turn,session_status,
+active_turn,queued_count,can_manage`. Status is `open`, `completed`, or
+`cancelled`; completed means submitted to the parent, not successful integration.
+`merge_turn.status` describes integration progress. `can_manage` is caller
+specific and is omitted from shared events.
+
+Existing project detail, message, file, workspace, research, and event APIs
+also work for the child ID. Child project details add `parent_project_id` and
+`delegation`; parent card messages add `delegation`. Integration messages add
+`merge_delegation`, including in their first creation event, so the UI displays
+and copies the result summary while the runner receives its execution context.
+Valid local artifact links in the submitted summary are bound to their source
+project; missing or unsafe local links become plain text. Child read access follows
+current parent membership dynamically. Only the task creator, assignees, and
+parent owner with current editing rights can write, complete, or cancel it.
+Closed tasks are read-only. Membership/settings are managed on the parent;
+deleting the parent stops and deletes its child tasks too.
+
+Parent `delegation.created` and `delegation.updated` events carry task metadata,
+progress, and the submitted summary. Child dialogue and native tool events stay
+on the child event channel. Native histories are neither copied nor forked.
 
 ## Adapter interface (`shui/agents.py`)
 

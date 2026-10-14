@@ -12,6 +12,21 @@ and an ordered task queue. Each message records its author. Every collaborator
 continues the project's existing native agent conversation. Projects run in
 parallel; turns within a project run in order.
 
+To delegate, type **@** in the main conversation, choose project members, and
+send the assignment. Shui opens one independent collaboration session for the
+task, where the assigned people and a dedicated agent can discuss and work.
+Every current project member can view that session from its task card or the
+**Tasks** panel. The main agent keeps its own conversation; child dialogue is
+not appended to its context. Add optional focused background when assigning.
+
+When the work is ready, choose **完成并汇总** in the child session, review the
+result summary, and submit it. The summary and artifact references enter the
+main agent's queue for integration. The child transcript remains available.
+Each task uses its own workspace and native session; later child messages
+resume that same session. Child agents are instructed to treat parent files
+as read-only references and place proposed changes in their own workspace.
+As with other Shui agents, this is not an operating-system sandbox.
+
 Paste text or screenshots into the message box with **Ctrl+V** (**Command+V**
 on macOS). Pasted images upload as attachments; accompanying text stays in the
 message box, and nothing is sent until you press Send. Use a message's **Copy**
@@ -117,7 +132,7 @@ documents the settings; Shui does not automatically load `.env` files.
 | `SHUI_CODEX_BIN` | `codex` | Executable name or absolute path |
 | `SHUI_CLAUDE_BIN` | `claude` | Executable name or absolute path |
 | `SHUI_AGENT_TIMEOUT_SECONDS` | `3600` | Maximum time for one agent turn, up to 86400 |
-| `SHUI_AGENT_IDLE_TIMEOUT_SECONDS` | `600` | Maximum silence between CLI protocol messages |
+| `SHUI_AGENT_IDLE_TIMEOUT_SECONDS` | `1800` | Maximum silence between CLI protocol messages |
 | `SHUI_PROJECT_UPLOAD_QUOTA` | `5368709120` | Total uploaded bytes per project |
 
 Agent subprocesses inherit the proxy through upper- and lower-case

@@ -94,6 +94,10 @@ class Store:
             CREATE INDEX IF NOT EXISTS claim_project ON claims(project_id,updated_at,id);
             CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),experiment_id TEXT REFERENCES experiments(id) ON DELETE SET NULL,metric TEXT NOT NULL DEFAULT '',value TEXT NOT NULL DEFAULT '',unit TEXT NOT NULL DEFAULT '',model TEXT NOT NULL DEFAULT '',summary TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'observed' CHECK(status IN ('observed','supports','partial','contradicts','inconclusive')),metadata TEXT NOT NULL DEFAULT '{}',created_by TEXT REFERENCES users(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
             CREATE INDEX IF NOT EXISTS result_project ON results(project_id,updated_at,id);
+            CREATE TABLE IF NOT EXISTS delegations(id TEXT PRIMARY KEY,parent_project_id TEXT NOT NULL REFERENCES projects(id),child_project_id TEXT NOT NULL UNIQUE REFERENCES projects(id),parent_message_id TEXT NOT NULL REFERENCES messages(id),created_by TEXT NOT NULL REFERENCES users(id),title TEXT NOT NULL,instructions TEXT NOT NULL,context TEXT NOT NULL DEFAULT '',attachment_ids TEXT NOT NULL DEFAULT '[]',status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','completed','cancelled')),summary TEXT NOT NULL DEFAULT '',merge_turn_id TEXT REFERENCES turns(id),client_id TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,completed_at TEXT,UNIQUE(parent_project_id,client_id));
+            CREATE INDEX IF NOT EXISTS delegation_parent ON delegations(parent_project_id,created_at);
+            CREATE TABLE IF NOT EXISTS delegation_assignees(delegation_id TEXT NOT NULL REFERENCES delegations(id) ON DELETE CASCADE,user_id TEXT NOT NULL REFERENCES users(id),PRIMARY KEY(delegation_id,user_id));
+            CREATE TABLE IF NOT EXISTS delegation_merge_attempts(delegation_id TEXT NOT NULL REFERENCES delegations(id) ON DELETE CASCADE,turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id),PRIMARY KEY(delegation_id,turn_id));
             """)
             c.execute("BEGIN IMMEDIATE")
             user_columns = {row[1] for row in c.execute("PRAGMA table_info(users)")}
@@ -189,16 +193,126 @@ class Store:
                 c.execute("SELECT * FROM users WHERE id=?", (id_,)).fetchone()
             )
 
+    def delegation_for_child(self, c, child_project_id):
+        return c.execute(
+            "SELECT * FROM delegations WHERE child_project_id=?", (child_project_id,)
+        ).fetchone()
+
     def project_role(self, c, project_id, user):
+        current = c.execute("SELECT * FROM users WHERE id=?", (user["id"],)).fetchone()
+        if not current or not current["is_active"]:
+            return None
         if not c.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
             return None
-        if user["role"] == "owner":
+        task = self.delegation_for_child(c, project_id)
+        if task:
+            role = self.project_role(c, task["parent_project_id"], current)
+            if not role:
+                return None
+            if task["status"] != "open":
+                return "viewer"
+            if role == "owner":
+                return "owner"
+            if role == "editor" and (
+                task["created_by"] == current["id"]
+                or c.execute(
+                    "SELECT 1 FROM delegation_assignees WHERE delegation_id=? AND user_id=?",
+                    (task["id"], current["id"]),
+                ).fetchone()
+            ):
+                return "editor"
+            return "viewer"
+        if current["role"] == "owner":
             return "owner"
         r = c.execute(
             "SELECT role FROM members WHERE project_id=? AND user_id=?",
-            (project_id, user["id"]),
+            (project_id, current["id"]),
         ).fetchone()
         return r["role"] if r else None
+
+    def can_manage_delegation(self, c, row, user):
+        role = self.project_role(c, row["parent_project_id"], user)
+        return bool(role == "owner" or (role == "editor" and (
+            row["created_by"] == user["id"] or c.execute(
+                "SELECT 1 FROM delegation_assignees WHERE delegation_id=? AND user_id=?",
+                (row["id"], user["id"]),
+            ).fetchone()
+        )))
+
+    def project_members(self, c, project_id):
+        task = self.delegation_for_child(c, project_id)
+        parent = task["parent_project_id"] if task else project_id
+        return [dict(row) for row in c.execute(
+            "SELECT u.id,u.username,u.display_name,m.role FROM members m "
+            "JOIN users u ON u.id=m.user_id WHERE m.project_id=? AND u.is_active=1 "
+            "ORDER BY u.display_name,u.id", (parent,)
+        )]
+
+    def delegation(self, c, row, user=None):
+        out = dict(row)
+        out.pop("client_id", None)
+        out["attachment_ids"] = json.loads(row["attachment_ids"])
+        out["attachments"] = [self.file(f) for fid in out["attachment_ids"] if (f := c.execute(
+            "SELECT * FROM files WHERE id=? AND project_id=?", (fid, row["parent_project_id"])
+        ).fetchone())]
+        creator = c.execute("SELECT * FROM users WHERE id=?", (row["created_by"],)).fetchone()
+        out["creator"] = self.user(creator) if creator else None
+        out["assignees"] = [self.user(u) for u in c.execute(
+            "SELECT u.* FROM delegation_assignees a JOIN users u ON u.id=a.user_id "
+            "WHERE a.delegation_id=? ORDER BY u.display_name,u.id", (row["id"],)
+        )]
+        parent = c.execute("SELECT name FROM projects WHERE id=?", (row["parent_project_id"],)).fetchone()
+        child = c.execute("SELECT status FROM projects WHERE id=?", (row["child_project_id"],)).fetchone()
+        out["parent_project_name"] = parent["name"] if parent else ""
+        out["session_status"] = child["status"] if child else "idle"
+        active = c.execute("SELECT * FROM turns WHERE project_id=? AND status='running'", (row["child_project_id"],)).fetchone()
+        out["active_turn"] = dict(active) if active else None
+        out["queued_count"] = c.execute("SELECT COUNT(*) FROM turns WHERE project_id=? AND status='queued'", (row["child_project_id"],)).fetchone()[0]
+        merged = c.execute("SELECT * FROM turns WHERE id=?", (row["merge_turn_id"],)).fetchone() if row["merge_turn_id"] else None
+        out["merge_turn"] = dict(merged) if merged else None
+        if user is not None:
+            out["can_manage"] = self.can_manage_delegation(c, row, user)
+        return out
+
+    def delegation_changed(self, c, child_project_id):
+        row = self.delegation_for_child(c, child_project_id)
+        if not row:
+            return None
+        c.execute("UPDATE delegations SET updated_at=? WHERE id=?", (now(), row["id"]))
+        row = self.delegation_for_child(c, child_project_id)
+        out = self.delegation(c, row)
+        self.event(c, row["parent_project_id"], "delegation.updated", {"delegation": out})
+        return out
+
+    def enqueue_turn(self, c, project_id, user, content, attachments, client_id, retry_of=None, emit=True):
+        """Insert a turn in the caller's transaction; validation and idempotency live in API."""
+        tid, mid, aid, at = uid(), uid(), uid(), now()
+        c.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?)", (
+            mid, project_id, "user", content, user["id"], "queued", tid,
+            json.dumps(attachments), at, None, client_id,
+        ))
+        c.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?)", (
+            aid, project_id, "assistant", "", None, "queued", tid, "[]", now(), None, None,
+        ))
+        c.execute("INSERT INTO turns VALUES(?,?,?,?,?,?,?,?,?,?)", (
+            tid, project_id, mid, aid, user["id"], "queued", at, None, None, None,
+        ))
+        c.execute("UPDATE projects SET status=CASE WHEN status='running' THEN status ELSE 'waiting' END,updated_at=? WHERE id=?", (at, project_id))
+        turn = dict(c.execute("SELECT * FROM turns WHERE id=?", (tid,)).fetchone())
+        if emit:
+            return self.publish_enqueued_turn(c, turn, retry_of)
+        return {"message": self.message(c, c.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()), "turn": turn}
+
+    def publish_enqueued_turn(self, c, turn, retry_of=None):
+        """Publish only after the caller has attached any task metadata in the transaction."""
+        project_id = turn["project_id"]
+        message = self.message(c, c.execute("SELECT * FROM messages WHERE id=?", (turn["user_message_id"],)).fetchone())
+        assistant = self.message(c, c.execute("SELECT * FROM messages WHERE id=?", (turn["assistant_message_id"],)).fetchone())
+        self.event(c, project_id, "message.created", {"message": message})
+        self.event(c, project_id, "message.created", {"message": assistant})
+        self.event(c, project_id, "turn.updated", {"turn": turn, "retry_of": retry_of})
+        self.delegation_changed(c, project_id)
+        return {"message": message, "turn": turn}
 
     def file(self, row):
         return {
@@ -245,6 +359,16 @@ class Store:
             ).fetchone()
             if f:
                 out["attachments"].append(self.file(f))
+        task = c.execute("SELECT * FROM delegations WHERE parent_message_id=?", (row["id"],)).fetchone()
+        if task:
+            out["delegation"] = self.delegation(c, task)
+        if row["role"] == "user" and row["turn_id"]:
+            merged = c.execute(
+                "SELECT d.* FROM delegations d JOIN delegation_merge_attempts a ON a.delegation_id=d.id WHERE a.turn_id=?",
+                (row["turn_id"],),
+            ).fetchone()
+            if merged:
+                out["merge_delegation"] = self.delegation(c, merged)
         return out
 
     @staticmethod
@@ -714,6 +838,12 @@ class Store:
             (row["id"],),
         ).fetchone()[0]
         out["permission_mode"] = "full-access"
+        task = self.delegation_for_child(c, row["id"])
+        out["parent_project_id"] = task["parent_project_id"] if task else None
+        if task:
+            out["delegation"] = self.delegation(c, task, user)
+            out["parent_project_name"] = out["delegation"]["parent_project_name"]
+            out["parent_role"] = self.project_role(c, task["parent_project_id"], user)
         if row["provider"] == "bridge":
             import time
 

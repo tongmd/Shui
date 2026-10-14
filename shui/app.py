@@ -16,7 +16,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -251,6 +251,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
     )
     app.state.store = store
     app.state.coordinator = coordinator
+    deleting_projects = set()
 
     def origin():
         file = os.environ.get("SHUI_ORIGIN_FILE")
@@ -323,17 +324,38 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             )
         return dict(row)
 
-    def access(request, pid, write=False, owner=False):
+    def access(request, pid, write=False, owner=False, allow_deleting=False):
         user = auth(request, write)
         with store.connect() as c:
             role = store.project_role(c, pid, user)
+            task = store.delegation_for_child(c, pid)
         if role is None:
             raise HTTPException(404, "Project not found")
+        if write and not allow_deleting and (pid in deleting_projects or (task and task["parent_project_id"] in deleting_projects)):
+            raise HTTPException(409, "This project is being deleted")
+        if write and task and task["status"] != "open":
+            raise HTTPException(409, "This collaboration task is closed")
         if owner and role != "owner":
             raise HTTPException(403, "Project owner permission required")
         if write and role not in ("owner", "editor"):
             raise HTTPException(403, "This project is read-only")
         return user, role
+
+    def root_project(c, pid):
+        if store.delegation_for_child(c, pid):
+            raise HTTPException(409, "Manage this collaboration through its parent project")
+
+    def writable(c, pid, user):
+        role = store.project_role(c, pid, user)
+        if role is None:
+            raise HTTPException(404, "Project not found")
+        task = store.delegation_for_child(c, pid)
+        if pid in deleting_projects or (task and task["parent_project_id"] in deleting_projects):
+            raise HTTPException(409, "This project is being deleted")
+        if task and task["status"] != "open":
+            raise HTTPException(409, "This collaboration task is closed")
+        if role not in ("owner", "editor"):
+            raise HTTPException(403, "This project is read-only")
 
     async def body(request):
         if request.headers.get("content-type", "").split(";")[0] != "application/json":
@@ -566,6 +588,12 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             raise HTTPException(404, "Account not found")
         return dict(row)
 
+    def turn_delegation_changed(c, project_id, turn_id):
+        store.delegation_changed(c, project_id)
+        task = c.execute("SELECT child_project_id FROM delegations WHERE merge_turn_id=?", (turn_id,)).fetchone()
+        if task:
+            store.delegation_changed(c, task["child_project_id"])
+
     def stop_disallowed_turns(c, user):
         for turn in c.execute(
             "SELECT * FROM turns WHERE author_id=? AND status IN ('queued','running')",
@@ -611,6 +639,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                         "UPDATE projects SET status='idle' WHERE id=? AND status!='error'",
                         (turn["project_id"],),
                     )
+                turn_delegation_changed(c, turn["project_id"], turn["id"])
 
     @app.patch("/api/users/{user_id}")
     async def user_update(user_id: str, request: Request):
@@ -701,7 +730,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
     def membership_payload(c, user):
         result = []
         for project in c.execute(
-            "SELECT id,name FROM projects ORDER BY name,id"
+            "SELECT id,name FROM projects WHERE id NOT IN (SELECT child_project_id FROM delegations) ORDER BY name,id"
         ).fetchall():
             row = c.execute(
                 "SELECT role FROM members WHERE project_id=? AND user_id=?",
@@ -751,6 +780,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                 for r in c.execute("SELECT * FROM members WHERE user_id=?", (user_id,))
             }
             for pid in wanted:
+                root_project(c, pid)
                 if not c.execute(
                     "SELECT 1 FROM projects WHERE id=?", (pid,)
                 ).fetchone():
@@ -791,7 +821,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
         u = auth(request)
         with store.connect() as c:
             rows = c.execute(
-                "SELECT * FROM projects ORDER BY updated_at DESC"
+                "SELECT * FROM projects WHERE id NOT IN (SELECT child_project_id FROM delegations) ORDER BY updated_at DESC"
             ).fetchall()
             return {
                 "projects": [
@@ -841,10 +871,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                 "SELECT * FROM files WHERE project_id=? ORDER BY created_at DESC",
                 (pid,),
             ).fetchall()
-            members = c.execute(
-                "SELECT u.id,u.username,u.display_name,m.role FROM members m JOIN users u ON u.id=m.user_id WHERE project_id=?",
-                (pid,),
-            ).fetchall()
+            members = store.project_members(c, pid)
             cursor = c.execute(
                 "SELECT COALESCE(MAX(id),0) FROM events WHERE project_id=?", (pid,)
             ).fetchone()[0]
@@ -856,6 +883,232 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                 "events_cursor": cursor,
                 "insights": store.research(c, pid),
             }
+
+    def qualify_summary_links(summary, child, parent):
+        # Match the same inline-link syntax as the renderer, leaving code and web URLs intact.
+        pattern = re.compile(
+            r"```[\s\S]*?(?:```|$)|`[^`\n]+`|"
+            r"(?P<prefix>\[[^\]\n]+\]\()"
+            r"(?P<target><[^>\n]+>|(?:\\.|[^\s()\\]|\((?:\\.|[^()\\])*\))+)"
+            r'(?P<suffix>(?:\s+"[^"\n]*")?\))'
+        )
+
+        def replace(match):
+            raw = match.group("target")
+            if not raw:
+                return match.group(0)
+            path = raw[1:-1] if raw.startswith("<") and raw.endswith(">") else raw
+            path = re.sub(r"\\([\\()[\]<> ])", r"\1", path)
+            if path.startswith(("/api/", "//", "#", "?")) or re.match(r"https?://", path, re.I):
+                return match.group(0)
+            path = re.sub(r"(?::\d+(?::\d+)?|#L\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)$", "", path)
+            if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", path) and not path.startswith(("file:", "sandbox:")):
+                return match.group(0)
+            projects = (child, parent) if path.startswith(("/", "file:")) else (child,)
+            for project_id in projects:
+                try:
+                    relative = artifact_link_path(store.workspace(project_id), unquote(path))
+                    safe_artifact(store.workspace(project_id), relative)
+                except HTTPException:
+                    continue
+                href = f"/api/projects/{project_id}/artifact?path={quote(relative, safe='')}"
+                return match.group("prefix") + href + match.group("suffix")
+            # A bare relative link would silently resolve against the parent workspace.
+            label = match.group("prefix")[1:-2]
+            return label + " (unavailable collaboration artifact: `" + raw.replace("`", "") + "`)"
+
+        return pattern.sub(replace, summary)[:12000]
+
+    def delegation_request_id(data):
+        value = textfield(data, "client_id", 100)
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{8,100}", value):
+            raise HTTPException(400, "Invalid request ID")
+        return value
+
+    def delegation_row(c, pid, did, user, manage=False):
+        row = c.execute("SELECT * FROM delegations WHERE id=? AND parent_project_id=?", (did, pid)).fetchone()
+        if not row:
+            raise HTTPException(404, "Collaboration task not found")
+        if manage and not store.can_manage_delegation(c, row, user):
+            raise HTTPException(403, "Only the task creator, assignees or project owner can manage this task")
+        return row
+
+    def delegation_response(c, task, user):
+        message = c.execute("SELECT * FROM messages WHERE id=?", (task["parent_message_id"],)).fetchone()
+        turn = c.execute("SELECT * FROM turns WHERE project_id=? ORDER BY created_at,id LIMIT 1", (task["child_project_id"],)).fetchone()
+        return {"delegation": store.delegation(c, task, user), "message": store.message(c, message), "turn": dict(turn)}
+
+    @app.get("/api/projects/{pid}/delegations")
+    async def delegation_list(pid: str, request: Request):
+        user, _ = access(request, pid)
+        with store.connect() as c:
+            root_project(c, pid)
+            return {
+                "delegations": [store.delegation(c, row, user) for row in c.execute(
+                    "SELECT * FROM delegations WHERE parent_project_id=? ORDER BY created_at DESC,id DESC", (pid,)
+                )],
+                "assignable_members": [member for member in store.project_members(c, pid) if member["role"] in ("owner", "editor")],
+            }
+
+    @app.get("/api/projects/{pid}/delegations/{did}")
+    async def delegation_get(pid: str, did: str, request: Request):
+        user, _ = access(request, pid)
+        with store.connect() as c:
+            return {"delegation": store.delegation(c, delegation_row(c, pid, did, user), user)}
+
+    @app.post("/api/projects/{pid}/delegations", status_code=201)
+    async def delegation_create(pid: str, request: Request):
+        user, _ = access(request, pid, True)
+        data = await body(request)
+        user, _ = access(request, pid, True)
+        if set(data) - {"content", "title", "context", "assignee_ids", "attachment_ids", "client_id"}:
+            raise HTTPException(400, "Unsupported collaboration field")
+        content = textfield(data, "content", 12000)
+        if not content:
+            raise HTTPException(400, "Describe the task to assign")
+        title = textfield(data, "title", 120) or content.splitlines()[0][:120]
+        context = textfield(data, "context", 8000)
+        client_id = delegation_request_id(data)
+        assignees = data.get("assignee_ids")
+        attachments = data.get("attachment_ids", [])
+        for values, maximum, label in ((assignees, 8, "assignees"), (attachments, 12, "attachments")):
+            if not isinstance(values, list) or len(values) > maximum or not all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{32}", value) for value in values) or len(values) != len(set(values)):
+                raise HTTPException(400, f"Invalid {label}")
+        if not assignees:
+            raise HTTPException(400, "Choose at least one project member")
+        workspace = None
+        try:
+            with store.connect() as c:
+                c.execute("BEGIN IMMEDIATE")
+                root_project(c, pid)
+                writable(c, pid, user)
+                parent = c.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+                if parent["provider"] == "bridge":
+                    raise HTTPException(409, "Collaboration tasks need a native Codex or Claude project")
+                previous = c.execute("SELECT * FROM delegations WHERE parent_project_id=? AND client_id=?", (pid, client_id)).fetchone()
+                if previous:
+                    previous_assignees = {r[0] for r in c.execute("SELECT user_id FROM delegation_assignees WHERE delegation_id=?", (previous["id"],))}
+                    if previous["created_by"] != user["id"] or previous["instructions"] != content or previous["title"] != title or previous["context"] != context or previous_assignees != set(assignees) or json.loads(previous["attachment_ids"]) != attachments:
+                        raise HTTPException(409, "Request ID already belongs to another task")
+                    return delegation_response(c, previous, user)
+                if c.execute("SELECT 1 FROM messages WHERE project_id=? AND client_id=?", (pid, client_id)).fetchone():
+                    raise HTTPException(409, "Request ID already belongs to a message")
+                if c.execute("SELECT COUNT(*) FROM delegations WHERE parent_project_id=? AND status='open'", (pid,)).fetchone()[0] >= 8:
+                    raise HTTPException(429, "At most 8 collaboration tasks can be open in one project")
+                members = {m["id"]: m for m in store.project_members(c, pid) if m["role"] in ("owner", "editor")}
+                if any(user_id not in members for user_id in assignees):
+                    raise HTTPException(400, "Assignees must be active editors or owners of this project")
+                for fid in attachments:
+                    file = c.execute("SELECT * FROM files WHERE id=? AND project_id=?", (fid, pid)).fetchone()
+                    if not file:
+                        raise HTTPException(400, "Attachment is not in this project")
+                    safe_artifact(store.workspace(pid), file["relative_path"])
+                did, child, mid, at = uid(), uid(), uid(), now()
+                workspace = store.workspace(child)
+                workspace.mkdir(mode=0o700)
+                (workspace / "uploads").mkdir(mode=0o700)
+                c.execute("INSERT INTO projects(id,name,description,provider,model,status,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (
+                    child, title, "Collaboration: " + title, parent["provider"], parent["model"], "idle", user["id"], at, at,
+                ))
+                card = "@" + " @".join(members[assignee]["username"] for assignee in assignees) + "\n\n" + content
+                c.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?)", (mid, pid, "user", card, user["id"], "complete", None, json.dumps(attachments), at, None, client_id))
+                c.execute("INSERT INTO delegations(id,parent_project_id,child_project_id,parent_message_id,created_by,title,instructions,context,attachment_ids,client_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
+                    did, pid, child, mid, user["id"], title, content, context, json.dumps(attachments), client_id, at, at,
+                ))
+                c.executemany("INSERT INTO delegation_assignees VALUES(?,?)", [(did, user_id) for user_id in assignees])
+                store.event(c, child, "project.created", {"name": title, "provider": parent["provider"], "actor": user["username"]})
+                store.enqueue_turn(c, child, user, content, [], "delegation.initial." + did)
+                c.execute("UPDATE projects SET updated_at=? WHERE id=?", (at, pid))
+                task = delegation_row(c, pid, did, user)
+                response = delegation_response(c, task, user)
+                store.event(c, pid, "message.created", {"message": response["message"]})
+                store.event(c, pid, "delegation.created", {"delegation": store.delegation(c, task)})
+        except BaseException:
+            if workspace is not None:
+                shutil.rmtree(workspace, ignore_errors=True)
+            raise
+        if start_worker:
+            coordinator.kick(child)
+        return response
+
+    @app.post("/api/projects/{pid}/delegations/{did}/merge")
+    async def delegation_merge(pid: str, did: str, request: Request):
+        user, _ = access(request, pid, True)
+        data = await body(request)
+        user, _ = access(request, pid, True)
+        if set(data) - {"summary", "client_id"}:
+            raise HTTPException(400, "Unsupported merge field")
+        client_id = delegation_request_id(data)
+        summary = textfield(data, "summary", 12000)
+        with store.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            writable(c, pid, user)
+            task = delegation_row(c, pid, did, user, True)
+            if task["status"] == "cancelled":
+                raise HTTPException(409, "This collaboration task was cancelled")
+            if task["merge_turn_id"]:
+                turn = c.execute("SELECT * FROM turns WHERE id=?", (task["merge_turn_id"],)).fetchone()
+                message = c.execute("SELECT * FROM messages WHERE id=?", (turn["user_message_id"],)).fetchone()
+                return {"delegation": store.delegation(c, task, user), "message": store.message(c, message), "turn": dict(turn)}
+            child = task["child_project_id"]
+            if c.execute("SELECT 1 FROM turns WHERE project_id=? AND status IN ('queued','running')", (child,)).fetchone():
+                raise HTTPException(409, "Wait for the collaboration agent to finish or stop its pending turns before merging")
+            if not summary:
+                last = c.execute("SELECT content FROM messages WHERE project_id=? AND role='assistant' AND status='complete' AND content!='' ORDER BY created_at DESC,id DESC LIMIT 1", (child,)).fetchone()
+                if not last:
+                    raise HTTPException(400, "Write a result summary before merging")
+                summary = last["content"][:12000]
+            summary = qualify_summary_links(summary, child, pid)
+            if c.execute("SELECT 1 FROM messages WHERE project_id=? AND client_id=?", (pid, client_id)).fetchone():
+                raise HTTPException(409, "Request ID already belongs to a message")
+            if c.execute("SELECT COUNT(*) FROM turns WHERE project_id=? AND status='queued'", (pid,)).fetchone()[0] >= 100:
+                raise HTTPException(429, "Project queue is full")
+            # Only final summary and bounded artifact references enter the parent native session.
+            files = [f"- {row['name']}: {row['relative_path']}" for row in c.execute("SELECT name,relative_path FROM files WHERE project_id=? ORDER BY created_at DESC LIMIT 12", (child,))]
+            files += [f"- {row['title'][:180]}: {row['path'][:500]}" for row in c.execute("SELECT title,path FROM figures WHERE project_id=? ORDER BY updated_at DESC LIMIT 12", (child,))]
+            content = (
+                f"Collaboration result: {task['title']}\n\n{summary}\n\n"
+                f"Source collaboration session: {child}\nChild workspace: {store.workspace(child)}\n"
+                "Review these results and integrate the relevant findings into the parent task. "
+                "Inspect child artifacts before copying or replacing any parent files. "
+                "The separate discussion remains available in the collaboration session.\n"
+                + ("Artifact references:\n" + "\n".join(files) if files else "")
+            )
+            result = store.enqueue_turn(c, pid, user, content, [], client_id, emit=False)
+            c.execute("UPDATE delegations SET status='completed',summary=?,merge_turn_id=?,updated_at=?,completed_at=? WHERE id=?", (summary, result["turn"]["id"], now(), now(), did))
+            c.execute("INSERT INTO delegation_merge_attempts VALUES(?,?)", (did, result["turn"]["id"]))
+            result = store.publish_enqueued_turn(c, result["turn"])
+            store.delegation_changed(c, child)
+            result["delegation"] = store.delegation(c, delegation_row(c, pid, did, user), user)
+        if start_worker:
+            coordinator.kick(pid)
+        return result
+
+    @app.post("/api/projects/{pid}/delegations/{did}/cancel")
+    async def delegation_cancel(pid: str, did: str, request: Request):
+        user, _ = access(request, pid, True)
+        with store.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            writable(c, pid, user)
+            task = delegation_row(c, pid, did, user, True)
+            if task["status"] == "completed":
+                raise HTTPException(409, "The result was already submitted; manage its integration turn in the parent session")
+            child = task["child_project_id"]
+            c.execute("UPDATE delegations SET status='cancelled',updated_at=? WHERE id=?", (now(), did))
+            for turn in c.execute("SELECT * FROM turns WHERE project_id=? AND status IN ('queued','running')", (child,)).fetchall():
+                if turn["status"] == "running":
+                    event = coordinator.cancels.get(turn["id"])
+                    if event:
+                        event.set()
+                else:
+                    c.execute("UPDATE turns SET status='cancelled',finished_at=? WHERE id=?", (now(), turn["id"]))
+                    c.execute("UPDATE messages SET status='cancelled' WHERE turn_id=?", (turn["id"],))
+                    store.event(c, child, "turn.updated", {"turn": dict(c.execute("SELECT * FROM turns WHERE id=?", (turn["id"],)).fetchone())})
+            if not c.execute("SELECT 1 FROM turns WHERE project_id=? AND status='running'", (child,)).fetchone():
+                c.execute("UPDATE projects SET status='idle',updated_at=? WHERE id=?", (now(), child))
+            store.delegation_changed(c, child)
+            store.event(c, child, "delegation.closed", {"status": "cancelled"})
+            return {"delegation": store.delegation(c, delegation_row(c, pid, did, user), user)}
 
     def research_text(data, key, limit, default=""):
         value = data.get(key, default)
@@ -913,6 +1166,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             raise HTTPException(400, "Unsupported research field")
         with store.connect() as c:
             c.execute("BEGIN IMMEDIATE")
+            writable(c, pid, u)
             existing_experiments = {
                 row["id"]
                 for row in c.execute(
@@ -1084,6 +1338,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             raise HTTPException(400, "Unsupported project setting")
         with store.connect() as c:
             c.execute("BEGIN IMMEDIATE")
+            root_project(c, pid)
             p = dict(c.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone())
             if {"model", "native_session_id"} & set(data) and c.execute(
                 "SELECT 1 FROM turns WHERE project_id=? AND status IN ('queued','running')",
@@ -1140,65 +1395,50 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
 
     @app.delete("/api/projects/{pid}")
     async def project_delete(pid: str, request: Request):
-        actor, _ = access(request, pid, True, True)
+        actor, _ = access(request, pid, True, True, allow_deleting=True)
         data = await body(request)
+        actor, _ = access(request, pid, True, True, allow_deleting=True)
         confirmation = textfield(data, "confirm_name", 120)
         with store.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            root_project(c, pid)
             project = c.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
             if not project:
                 raise HTTPException(404, "Project not found")
             if confirmation != project["name"]:
                 raise HTTPException(400, "Type the exact project name to delete it")
-            c.execute("BEGIN IMMEDIATE")
-            c.execute(
-                "UPDATE projects SET status='error',updated_at=? WHERE id=?",
-                (now(), pid),
-            )
-            c.execute(
-                "UPDATE turns SET status='cancelled',finished_at=? WHERE project_id=? AND status='queued'",
-                (now(), pid),
-            )
-            c.execute(
-                "UPDATE messages SET status='cancelled' WHERE turn_id IN (SELECT id FROM turns WHERE project_id=? AND status='cancelled')",
-                (pid,),
-            )
-            for tid, event in list(coordinator.cancels.items()):
-                if c.execute(
-                    "SELECT 1 FROM turns WHERE id=? AND project_id=?", (tid, pid)
-                ).fetchone():
-                    event.set()
-            running = c.execute(
-                "SELECT 1 FROM turns WHERE project_id=? AND status='running'", (pid,)
-            ).fetchone()
-            task = coordinator.tasks.get(pid) if running else None
-        if task:
+            project_ids = [r[0] for r in c.execute("SELECT child_project_id FROM delegations WHERE parent_project_id=?", (pid,))] + [pid]
+            deleting_projects.update(project_ids)
+            c.execute("UPDATE delegations SET status='cancelled',updated_at=? WHERE parent_project_id=? AND status='open'", (now(), pid))
+            pending = []
+            for project_id in project_ids:
+                c.execute("UPDATE projects SET status='error',updated_at=? WHERE id=?", (now(), project_id))
+                c.execute("UPDATE turns SET status='cancelled',finished_at=? WHERE project_id=? AND status='queued'", (now(), project_id))
+                c.execute("UPDATE messages SET status='cancelled' WHERE turn_id IN (SELECT id FROM turns WHERE project_id=? AND status='cancelled')", (project_id,))
+                for turn in c.execute("SELECT id FROM turns WHERE project_id=? AND status='running'", (project_id,)):
+                    event = coordinator.cancels.get(turn["id"])
+                    if event:
+                        event.set()
+                if task := coordinator.tasks.get(project_id):
+                    pending.append(task)
+        if pending:
             try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=20)
+                await asyncio.wait_for(asyncio.gather(*(asyncio.shield(task) for task in pending)), timeout=20)
             except asyncio.TimeoutError:
-                raise HTTPException(
-                    409, "The active task is still stopping; try again shortly"
-                )
+                raise HTTPException(409, "The active task is still stopping; try again shortly")
+        actor, _ = access(request, pid, True, True, allow_deleting=True)
         with store.connect() as c:
             c.execute("BEGIN IMMEDIATE")
-            project = c.execute("SELECT id FROM projects WHERE id=?", (pid,)).fetchone()
-            if not project:
-                return {"ok": True, "deleted": pid}
-            for table in (
-                "results",
-                "claims",
-                "figures",
-                "experiments",
-                "presence",
-                "bridge_state",
-                "events",
-                "files",
-                "turns",
-                "messages",
-                "members",
-            ):
-                c.execute(f"DELETE FROM {table} WHERE project_id=?", (pid,))
-            c.execute("DELETE FROM projects WHERE id=?", (pid,))
-        shutil.rmtree(store.workspace(pid), ignore_errors=True)
+            # Remove references before the underlying child/parent messages and turns.
+            c.execute("DELETE FROM delegations WHERE parent_project_id=?", (pid,))
+            for project_id in project_ids:
+                for table in ("results", "claims", "figures", "experiments", "presence", "bridge_state", "events", "files", "turns", "messages", "members"):
+                    c.execute(f"DELETE FROM {table} WHERE project_id=?", (project_id,))
+                c.execute("DELETE FROM migrations WHERE project_id=?", (project_id,))
+                c.execute("DELETE FROM projects WHERE id=?", (project_id,))
+        for project_id in project_ids:
+            shutil.rmtree(store.workspace(project_id), ignore_errors=True)
+            deleting_projects.discard(project_id)
         return {"ok": True, "deleted": pid, "actor": actor["username"]}
 
     @app.get("/api/projects/{pid}/messages")
@@ -1225,6 +1465,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             raise HTTPException(400, "Too many attachments")
         with store.connect() as c:
             c.execute("BEGIN IMMEDIATE")
+            writable(c, pid, u)
             previous = c.execute(
                 "SELECT * FROM messages WHERE project_id=? AND client_id=?",
                 (pid, client_id),
@@ -1232,6 +1473,8 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             if previous:
                 if previous["author_id"] != u["id"]:
                     raise HTTPException(409, "Request ID belongs to another member")
+                if not previous["turn_id"]:
+                    raise HTTPException(409, "Request ID belongs to a collaboration task")
                 return {
                     "message": store.message(c, previous),
                     "turn": dict(
@@ -1253,67 +1496,21 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                     "SELECT 1 FROM files WHERE id=? AND project_id=?", (id_, pid)
                 ).fetchone():
                     raise HTTPException(400, "Attachment is not in this project")
-            tid, mid, aid = uid(), uid(), uid()
-            at = now()
-            c.execute(
-                "INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    mid,
-                    pid,
-                    "user",
-                    content,
-                    u["id"],
-                    "queued",
-                    tid,
-                    json.dumps(attachments),
-                    at,
-                    None,
-                    client_id,
-                ),
-            )
-            c.execute(
-                "INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    aid,
-                    pid,
-                    "assistant",
-                    "",
-                    None,
-                    "queued",
-                    tid,
-                    "[]",
-                    now(),
-                    None,
-                    None,
-                ),
-            )
-            c.execute(
-                "INSERT INTO turns VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (tid, pid, mid, aid, u["id"], "queued", at, None, None, None),
-            )
-            c.execute(
-                "UPDATE projects SET status=CASE WHEN status='running' THEN status ELSE 'waiting' END,updated_at=? WHERE id=?",
-                (at, pid),
-            )
-            msg = store.message(
-                c, c.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()
-            )
-            turn = dict(c.execute("SELECT * FROM turns WHERE id=?", (tid,)).fetchone())
-            store.event(c, pid, "message.created", {"message": msg})
-            store.event(
-                c,
-                pid,
-                "message.created",
-                {
-                    "message": store.message(
-                        c,
-                        c.execute(
-                            "SELECT * FROM messages WHERE id=?", (aid,)
-                        ).fetchone(),
-                    )
-                },
-            )
-            store.event(c, pid, "turn.updated", {"turn": turn, "retry_of": retry_of})
+            merging = None
+            if retry_of:
+                merging = c.execute(
+                    "SELECT d.* FROM delegations d JOIN delegation_merge_attempts a ON a.delegation_id=d.id WHERE a.turn_id=?",
+                    (retry_of,),
+                ).fetchone()
+                if merging and merging["merge_turn_id"] != retry_of:
+                    raise HTTPException(409, "A newer integration attempt already exists; retry that turn instead")
+            result = store.enqueue_turn(c, pid, u, content, attachments, client_id, retry_of, emit=not bool(merging))
+            if merging:
+                c.execute("UPDATE delegations SET merge_turn_id=?,updated_at=? WHERE id=?", (result["turn"]["id"], now(), merging["id"]))
+                c.execute("INSERT INTO delegation_merge_attempts VALUES(?,?)", (merging["id"], result["turn"]["id"]))
+                result = store.publish_enqueued_turn(c, result["turn"], retry_of)
+                store.delegation_changed(c, merging["child_project_id"])
+            msg, turn = result["message"], result["turn"]
         if start_worker:
             coordinator.kick(pid)
         return {"message": msg, "turn": turn}
@@ -1405,6 +1602,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                     raise HTTPException(
                         409, "This turn belongs to the external session bridge"
                     )
+            turn_delegation_changed(c, pid, tid)
             store.event(
                 c,
                 pid,
@@ -1593,15 +1791,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
     async def members(pid: str, request: Request):
         access(request, pid)
         with store.connect() as c:
-            return {
-                "members": [
-                    dict(x)
-                    for x in c.execute(
-                        "SELECT u.id,u.username,u.display_name,m.role FROM members m JOIN users u ON u.id=m.user_id WHERE project_id=?",
-                        (pid,),
-                    )
-                ]
-            }
+            return {"members": store.project_members(c, pid)}
 
     @app.post("/api/projects/{pid}/members")
     async def member_add(pid: str, request: Request):
@@ -1612,6 +1802,8 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
         if role not in ("editor", "viewer"):
             raise HTTPException(400, "Choose editor or viewer")
         with store.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            root_project(c, pid)
             member = c.execute(
                 "SELECT * FROM users WHERE username=?",
                 (textfield(data, "username", 40),),
@@ -1641,6 +1833,8 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
     async def member_remove(pid: str, user_id: str, request: Request):
         u, _ = access(request, pid, True, True)
         with store.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            root_project(c, pid)
             m = c.execute(
                 "SELECT role FROM members WHERE project_id=? AND user_id=?",
                 (pid, user_id),

@@ -4,6 +4,23 @@
 
 The implementation targets the locally inspected Codex 0.153.4 app-server schema and Claude Code 2.1.261 print interface. Provider discovery reports only whether an executable is installed. It does not claim that credentials, quota, models, or service connectivity work.
 
+Collaboration tasks allocate a new child project and native conversation. The
+first turn starts a fresh native thread; subsequent messages from the assigned
+humans resume that child thread. Parent and child use separate workspace and
+session locks and can run concurrently. A focused task brief supplies the
+assignment, optional background, selected attachment references, and parent
+resource links. It never copies or forks the parent's transcript/native history.
+
+Child agents receive instructions to read parent resources only as needed and
+write proposals in their own workspace. This is a task constraint under the
+existing full-access execution model, not a new filesystem security boundary.
+The parent receives task status events without child dialogue. Only an explicit
+completion request sends a bounded result summary and artifact references to
+the parent's existing queue/session; it does not automatically overwrite files.
+Cancellation, closure, and revocation of the turn author's access stop child
+execution. Restart marks interrupted child turns visibly, without replaying
+them. Closed child transcripts remain readable by current parent members.
+
 ## Execution and host setup
 
 The owner has selected full-access execution. Children run as the host account that runs Shui, with that account's existing CLI authentication and filesystem rights. Shui does not grant root, use sudo, or mint service credentials. Codex uses `approvalPolicy: "never"` and `danger-full-access`; Claude uses `bypassPermissions` and `--dangerously-skip-permissions`.

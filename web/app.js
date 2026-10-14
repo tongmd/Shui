@@ -19,7 +19,7 @@
   function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined && text !== null) e.textContent = String(text); return e; }
   function button(label, cls, action, glyph) { const b = el('button', cls, label); b.type = 'button'; if (glyph) b.prepend(icon(glyph)); if (action) b.addEventListener('click', action); return b; }
   function iconButton(label, glyph, action) { const b = button('', 'icon-btn', action, glyph); b.title = label; b.setAttribute('aria-label', label); return b; }
-  const state = { user: null, csrf: null, providers: [], projects: [], project: null, messages: new Map(), turns: new Map(), tools: new Map(), files: [], members: [], presence: [], activity: [], insights: null, cursor: 0, source: null, reconnectTimer: null, reconnectDelay: 1200, heartbeat: null, metaTimer: null, insightTimer: null, epoch: 0, tab: 'files', workspacePath: '', attachments: [], uploading: 0, sending: false, pendingSend: null, historyMore: true, loadingHistory: false, dialogAction: null, projectLoading: false, liveConnected: false };
+  const state = { user: null, csrf: null, providers: [], projects: [], project: null, messages: new Map(), turns: new Map(), tools: new Map(), files: [], members: [], presence: [], activity: [], insights: null, cursor: 0, source: null, reconnectTimer: null, reconnectDelay: 1200, heartbeat: null, metaTimer: null, insightTimer: null, epoch: 0, tab: 'files', workspacePath: '', attachments: [], uploading: 0, sending: false, pendingSend: null, historyMore: true, loadingHistory: false, dialogAction: null, projectLoading: false, liveConnected: false, delegations: new Map(), assignableMembers: [], selectedAssignees: [], mention: null, mentionIndex: 0, mentionMatches: [], delegationError: '', delegationLoading: false, delegationBusy: false };
   const labels = { idle: '准备就绪', running: '正在推进', queued: '排队中', waiting: '等待处理', complete: '已完成', failed: '任务失败', error: '需要关注', cancelled: '已取消', interrupted: '已中断' };
   const providerNames = { codex: 'Codex', claude: 'Claude', bridge: 'Bridge' };
   const roles = { owner: '管理员', editor: '协作者', viewer: '只读成员', member: '团队成员' };
@@ -56,7 +56,19 @@
   function name(user) { return user?.display_name || user?.username || '团队成员'; }
   function avatar(user, cls = '') { const n = name(user); const a = el('span', `avatar tone-${[...n].reduce((v, c) => v + c.charCodeAt(0), 0) % 5} ${cls}`, /[\u3400-\u9fff]/.test(n) ? n.slice(-2) : n.slice(0, 2).toUpperCase()); a.title = n; return a; }
   function isOwner() { return state.user?.role === 'owner' || state.project?.role === 'owner'; }
-  function canWrite() { return !!state.project && (isOwner() || state.project.role === 'editor'); }
+  function canWrite() {
+    if (!state.project) return false;
+    if (state.project.parent_project_id) return state.project.delegation?.status === 'open' && ['owner', 'editor'].includes(state.project.role);
+    return isOwner() || state.project.role === 'editor';
+  }
+  function parentProjectId() { return state.project?.parent_project_id || state.project?.id; }
+  function canAssign() { return canWrite() && !state.project.parent_project_id && state.project.provider !== 'bridge'; }
+  function canManageDelegation(task) {
+    if (!task || !state.user || !state.project) return false;
+    const role = state.project.parent_project_id ? state.project.parent_role : state.project.role;
+    // SSE payloads are shared. Never use a can_manage flag computed for another user.
+    return role === 'owner' || (role === 'editor' && (String(task.created_by) === String(state.user.id) || (task.assignees || []).some(user => String(user.id) === String(state.user.id))));
+  }
   function projectAPI(suffix = '', pid = state.project?.id) { return `/projects/${encodeURIComponent(pid)}${suffix}`; }
   async function api(path, options = {}) {
     const method = options.method || 'GET'; const headers = new Headers(options.headers || {});
@@ -72,6 +84,7 @@
       if (response.status === 403 && (data?.code === 'password_change_required' || data?.detail?.code === 'password_change_required')) { if (state.user) state.user.must_change_password = true; showPasswordChange(); throw new Error('请先修改初始密码，再进入工作空间。'); }
       const detail = data?.detail; const message = typeof detail === 'string' ? detail : detail?.message;
       const translated = { 'Current password is incorrect': '当前密码不正确，请重新输入。', 'New passwords do not match': '两次输入的新密码不一致。', 'New password must be 8–256 characters': '新密码需要 8–256 位字符。', 'Choose a new password different from your username and current password': '新密码不能与用户名或当前密码相同。', 'Display name is required': '请输入显示名称。', 'Stop the running task before deleting this project': '请先停止正在运行的任务，再删除项目。' };
+      Object.assign(translated, { 'This collaboration task is closed': '协作任务已结束，此会话只读。', 'This collaboration task was cancelled': '协作任务已取消，无法提交汇总。', 'Only the task creator, assignees or project owner can manage this task': '只有发起人、被分派成员和项目管理员可以管理此任务。', 'At most 8 collaboration tasks can be open in one project': '每个项目最多同时开展 8 项协作任务，请先完成或取消已有任务。', 'Assignees must be active editors or owners of this project': '被分派成员的权限已变化，请刷新任务栏后重新选择。', 'Wait for the collaboration agent to finish or stop its pending turns before merging': '请等助手回复和排队消息处理完，再汇总。', 'Write a result summary before merging': '请填写最终摘要后再汇总。', 'Collaboration tasks need a native Codex or Claude project': '此项目的助手暂不支持独立协作会话。', 'The result was already submitted; manage its integration turn in the parent session': '结果已提交，请到主会话查看整合进度。', 'Project queue is full': '主会话队列已满，请稍后提交结果。' });
       const error = new Error(translated[message] || message || `请求未完成（${response.status}），请重试。`); error.status = response.status; throw error;
     }
     return data;
@@ -80,6 +93,7 @@
   function stopEvents() { if (state.source) state.source.close(); state.source = null; clearTimeout(state.pollTimer); state.pollTimer = null; clearTimeout(state.reconnectTimer); state.reconnectTimer = null; clearTimeout(state.metaTimer); state.metaTimer = null; clearTimeout(state.insightTimer); state.insightTimer = null; clearInterval(state.heartbeat); state.heartbeat = null; }
   function clearProjectView() {
     stopEvents(); state.epoch++; state.project = null; state.projectLoading = false; state.messages.clear(); state.turns.clear(); state.tools.clear(); state.files = []; state.members = []; state.presence = []; state.activity = []; state.insights = null; state.attachments = []; state.uploading = 0; state.sending = false; state.pendingSend = null; state.workspacePath = ''; state.cursor = 0; state.historyMore = true; state.loadingHistory = false;
+    resetDelegations();
     ['messages', 'shared-files', 'workspace-files', 'workspace-path', 'member-list', 'activity-list', 'presence', 'project-links', 'insights-summary', 'experiment-list', 'figure-list'].forEach(id => $(id).replaceChildren());
     ['project-title', 'project-description', 'project-status', 'project-model', 'queue-label', 'preview-title'].forEach(id => $(id).textContent = '');
     $('message-input').value = ''; $('message-input').style.height = ''; $('file-input').value = ''; $('queue-banner').hidden = true; $('load-history').hidden = true; $('jump-latest').hidden = true; $('composer').classList.remove('drag-over');
@@ -106,24 +120,30 @@
   async function loadProjects(preferId) {
     if (!state.user || state.user.must_change_password) return;
     $('project-list').replaceChildren(el('div', 'skeleton'), el('div', 'skeleton'));
-    try { const data = await api('/projects'); state.projects = data.projects || []; renderProjects(); const id = preferId || stored('shui-project'); const next = state.projects.find(p => String(p.id) === String(id)) || state.projects[0]; if (next) await selectProject(next.id); else showWelcome(); }
+    try { const data = await api('/projects'); state.projects = (data.projects || []).filter(p => !p.parent_project_id); renderProjects(); const id = preferId || stored('shui-project'); const next = state.projects.find(p => String(p.id) === String(id)) || state.projects[0]; const child = !preferId && restoredChildSession(next?.id); if (next) await selectProject(child || next.id, child ? next.id : null); else showWelcome(); }
     catch (err) { $('project-list').replaceChildren(el('p', 'empty-small', err.message), button('重新加载', 'quiet-btn', () => loadProjects(), 'refresh')); setConnection('', '加载失败'); }
   }
   function renderProjects() {
     const query = $('project-search').value.trim().toLowerCase(); const list = state.projects.filter(p => `${p.name} ${p.description || ''}`.toLowerCase().includes(query)); $('project-list').replaceChildren();
     if (!list.length) { $('project-list').append(el('p', 'empty-small', query ? '没有找到这个项目。' : '还没有项目，下一篇研究从这里开始。')); return; }
-    list.forEach(p => { const b = button('', `project-item${state.project?.id === p.id ? ' active' : ''}`, () => selectProject(p.id)); b.setAttribute('aria-current', state.project?.id === p.id ? 'page' : 'false'); const s = el('span', 'project-symbol'); s.append(icon('paper')); const t = el('span', 'project-item-text'); t.append(el('strong', '', p.name), el('small', '', `${providerNames[p.provider] || p.provider} · ${labels[p.status] || '准备就绪'}`)); b.append(s, t); if (p.status === 'running') b.append(el('span', 'project-running-dot')); $('project-list').append(b); });
+    list.forEach(p => { const active = String(parentProjectId()) === String(p.id); const b = button('', `project-item${active ? ' active' : ''}`, () => selectProject(p.id)); b.setAttribute('aria-current', active ? 'page' : 'false'); const s = el('span', 'project-symbol'); s.append(icon('paper')); const t = el('span', 'project-item-text'); t.append(el('strong', '', p.name), el('small', '', `${providerNames[p.provider] || p.provider} · ${labels[p.status] || '准备就绪'}`)); b.append(s, t); if (p.status === 'running') b.append(el('span', 'project-running-dot')); $('project-list').append(b); });
   }
-  function showWelcome() { clearProjectView(); stored('shui-project', null); $('welcome').hidden = false; $('project-view').hidden = true; $('breadcrumb-project').textContent = '概览'; $('inspector-empty').hidden = false; ['files', 'insights', 'activity', 'members'].forEach(t => $(`panel-${t}`).hidden = true); $('project-error').hidden = true; $('conversation-empty').hidden = true; renderProjects(); setConnection('connected', '已登录'); }
+  function restoredChildSession(parentId) {
+    try { const value = JSON.parse(stored('shui-child-session')); return value && String(value.parent_id) === String(parentId) && typeof value.child_id === 'string' ? value.child_id : null; } catch (_) { return null; }
+  }
+  function showWelcome() { clearProjectView(); stored('shui-project', null); stored('shui-child-session', null); $('welcome').hidden = false; $('project-view').hidden = true; $('breadcrumb-project').textContent = '概览'; $('inspector-empty').hidden = false; ['files', 'insights', 'activity', 'tasks', 'members'].forEach(t => $(`panel-${t}`).hidden = true); $('project-error').hidden = true; $('conversation-empty').hidden = true; renderProjects(); setConnection('connected', '已登录'); }
   async function projectUnavailable(id, message = '项目已删除，或你已没有访问权限。') {
     if (String(state.project?.id) !== String(id)) return;
+    const parentId = state.project?.parent_project_id;
+    if (parentId) { stored('shui-child-session', null); state.project = null; if (message) toast(message); await selectProject(parentId); return; }
     state.projects = state.projects.filter(project => String(project.id) !== String(id)); showWelcome(); if (message) toast(message); await loadProjects();
   }
-  async function selectProject(id) {
+  async function selectProject(id, parentId = null) {
     if (!state.user || state.user.must_change_password) return;
     if (String(state.project?.id) === String(id) && !state.projectLoading) { closeDrawers(); return; }
     const epoch = ++state.epoch; stopEvents(); closeDrawers(); state.projectLoading = true; state.messages.clear(); state.turns.clear(); state.tools.clear(); state.presence = []; state.activity = []; state.insights = null; state.attachments = []; state.uploading = 0; state.pendingSend = null; state.sending = false; state.workspacePath = ''; state.cursor = 0; state.historyMore = true;
-    state.project = state.projects.find(p => String(p.id) === String(id)) || { id, name: '正在加载…' }; $('message-input').value = ''; $('message-input').style.height = ''; renderUploads(); renderProjects(); renderHeader();
+    resetDelegations();
+    state.project = state.projects.find(p => String(p.id) === String(id)) || { id, name: '正在加载…', parent_project_id: parentId }; $('message-input').value = ''; $('message-input').style.height = ''; renderUploads(); renderProjects(); renderHeader();
     $('welcome').hidden = true; $('project-view').hidden = false; $('project-error').hidden = true; $('inspector-empty').hidden = true; $('messages').replaceChildren(el('div', 'loading-message', '正在打开共同的讨论…')); $('conversation-empty').hidden = true; $('load-history').hidden = true; $('shared-files').replaceChildren(el('div', 'skeleton')); $('workspace-files').replaceChildren(el('div', 'skeleton')); setConnection('reconnecting', '正在连接'); updateComposer();
     try {
       const d = await api(projectAPI('', id)); if (epoch !== state.epoch) return;
@@ -133,37 +153,39 @@
         if (m.role === 'user' && m.turn_id) state.turns.set(String(m.turn_id), { id: m.turn_id, author_id: m.author?.id, status: m.status });
       });
       if (d.project.active_turn) state.turns.set(String(d.project.active_turn.id), d.project.active_turn);
-      state.projectLoading = false; state.historyMore = (d.messages || []).length >= 100; stored('shui-project', id); updateProjectInList(d.project); renderHeader(); renderMessages(); renderFiles(); renderMembers(); renderInsights(); renderTab(); updateComposer(); scrollBottom();
-      connectEvents(epoch); state.lastStreamEvent = 0; state.lastMetaPoll = 0; pollEvents(epoch); heartbeat(epoch); state.heartbeat = setInterval(() => heartbeat(epoch), 25000); loadWorkspace(''); loadActivity(); loadInsights();
+      state.projectLoading = false; state.historyMore = (d.messages || []).length >= 100; stored('shui-project', parentProjectId()); stored('shui-child-session', d.project.parent_project_id ? JSON.stringify({ parent_id: d.project.parent_project_id, child_id: d.project.id }) : null); updateProjectInList(d.project); renderHeader(); renderMessages(); renderFiles(); renderMembers(); renderInsights(); renderTab(); updateComposer(); scrollBottom();
+      connectEvents(epoch); state.lastStreamEvent = 0; state.lastMetaPoll = 0; pollEvents(epoch); heartbeat(epoch); state.heartbeat = setInterval(() => heartbeat(epoch), 25000); loadWorkspace(''); loadActivity(); loadInsights(); loadDelegations();
     } catch (err) { if (epoch !== state.epoch) return; if (err.status === 404 || err.status === 403) { await projectUnavailable(id); return; } state.projectLoading = false; $('messages').replaceChildren(); $('project-error').replaceChildren(el('span', '', err.message), button('重试', 'quiet-btn', () => { state.project = null; selectProject(id); }, 'refresh')); $('project-error').hidden = false; setConnection('', '未连接'); updateComposer(); }
   }
-  function updateProjectInList(p) { const i = state.projects.findIndex(x => x.id === p.id); if (i >= 0) state.projects[i] = { ...state.projects[i], ...p }; else state.projects.unshift(p); renderProjects(); }
+  function updateProjectInList(p) { if (!p.parent_project_id) { const i = state.projects.findIndex(x => x.id === p.id); if (i >= 0) state.projects[i] = { ...state.projects[i], ...p }; else state.projects.unshift(p); } renderProjects(); }
   function refreshProjectMetaSoon() {
     clearTimeout(state.metaTimer);
     const epoch = state.epoch;
     state.metaTimer = setTimeout(async () => {
       try {
-        const d = await api('/projects');
+        const child = !!state.project?.parent_project_id;
+        const d = await api(child ? projectAPI() : '/projects');
         if (epoch !== state.epoch || !state.project) return;
+        if (child) { state.project = { ...state.project, ...d.project }; if (d.members) state.members = d.members; renderHeader(); renderMembers(); loadDelegations(true); return; }
         state.projects = d.projects || [];
         const current = state.projects.find(p => p.id === state.project.id);
         if (!current) { await projectUnavailable(state.project.id); return; }
         state.project = { ...state.project, ...current }; renderHeader();
-        renderProjects();
-      } catch (_) { /* The stream still supplies message and turn updates. */ }
+        renderProjects(); loadDelegations(true);
+      } catch (err) { if (epoch === state.epoch && [403, 404].includes(err.status)) await projectUnavailable(state.project?.id); }
     }, 250);
   }
   function renderHeader() {
-    const p = state.project; if (!p) return; $('project-title').textContent = p.name; $('breadcrumb-project').textContent = p.name; $('project-description').textContent = p.description || ''; $('project-description').hidden = !p.description;
-    $('provider-pill').replaceChildren(icon('spark'), document.createTextNode(providerNames[p.provider] || p.provider || '')); $('project-status').textContent = labels[p.status] || '正在加载'; $('project-model').textContent = p.model || ''; $('project-settings').hidden = !isOwner(); $('add-member').hidden = !isOwner();
+    const p = state.project; if (!p) return; $('project-title').textContent = p.name; $('breadcrumb-project').replaceChildren(); if (p.parent_project_id) { $('breadcrumb-project').append(button(p.parent_project_name || p.delegation?.parent_project_name || '主会话', 'breadcrumb-parent', () => selectProject(p.parent_project_id)), document.createTextNode(` / ${p.name}`)); } else $('breadcrumb-project').textContent = p.name; const description = p.parent_project_id ? `${p.parent_project_name || '主项目'} · 独立协作会话` : p.description; $('project-description').textContent = description || ''; $('project-description').hidden = !description;
+    $('provider-pill').replaceChildren(icon('spark'), document.createTextNode(providerNames[p.provider] || p.provider || '')); $('project-status').textContent = labels[p.status] || '正在加载'; $('project-model').textContent = p.model || ''; $('project-settings').hidden = !isOwner() || !!p.parent_project_id; $('add-member').hidden = !isOwner() || !!p.parent_project_id;
     const links = $('project-links'); links.replaceChildren();
     [['github_url', 'GitHub'], ['overleaf_url', 'Overleaf']].forEach(([key, label]) => { if (!p[key]) return; let url; try { url = new URL(p[key]); } catch (_) { return; } if (url.protocol !== 'https:' || url.username || url.password) return; const a = el('a', 'project-link', `${label} ↗`); a.href = url.href; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.setAttribute('aria-label', `打开 ${label} 项目（新窗口）`); links.append(a); });
     links.hidden = !links.childElementCount;
     const turn = p.active_turn; const n = Number(p.queued_count) || 0; const running = turn && !terminalStatuses.has(turn.status);
     $('queue-banner').hidden = !running && !n; $('queue-label').textContent = running ? `正在处理共同的任务${n ? ` · 后面还有 ${n} 条消息` : ''}` : `${n} 条消息等待处理`;
-    $('cancel-active').hidden = !running || !canCancel(turn); renderPresence(); updateComposer();
+    $('cancel-active').hidden = !running || !canCancel(turn); renderPresence(); renderChildSession(); updateComposer();
   }
-  function canCancel(t) { return !!t && !(state.project?.provider === 'bridge' && t.status === 'running') && (isOwner() || (canWrite() && String(t.author_id) === String(state.user?.id))); }
+  function canCancel(t) { return !!t && canWrite() && !(state.project?.provider === 'bridge' && t.status === 'running') && (isOwner() || String(t.author_id) === String(state.user?.id)); }
   function canRetry(t) { return !!t && canWrite() && (isOwner() || String(t.author_id) === String(state.user?.id)); }
   function updateTurn(t) {
     if (!t?.id) return;
@@ -181,13 +203,155 @@
     renderHeader();
     updateProjectInList(state.project);
   }
-  function updateComposer() { const available = canWrite() && !state.projectLoading; $('message-input').disabled = !available; $('attach-button').disabled = !available || state.sending || state.uploading > 0; $('send-message').disabled = !available || state.sending || state.uploading > 0 || (!$('message-input').value.trim() && !state.attachments.length); $('message-input').placeholder = state.project?.role === 'viewer' && !isOwner() ? '只读项目' : '发送消息，或粘贴图片…'; $('composer-note').textContent = state.project?.role === 'viewer' && !isOwner() ? '只读权限' : state.sending ? '正在发送…' : ''; }
+  function resetDelegations() {
+    state.delegations.clear(); state.assignableMembers = []; state.selectedAssignees = []; state.delegationError = ''; state.delegationLoading = false; state.delegationBusy = false;
+    $('assignment-context').value = ''; $('delegation-list').replaceChildren(); $('child-session-bar').hidden = true; $('child-session-context').open = false; $('child-session-context-body').replaceChildren(); $('child-session-context-body').removeAttribute('data-content'); hideMentions(); renderAssignees();
+  }
+  function mentionAtCursor(value, cursor) {
+    const before = String(value).slice(0, cursor);
+    const match = /(?:^|[\s（(，,：:])@([\p{L}\p{N}_.-]{0,40})$/u.exec(before);
+    if (!match) return null;
+    const start = before.length - match[1].length - 1;
+    const lines = before.slice(0, start).split('\n'); let fence = null;
+    for (const line of lines) {
+      const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+      if (marker) {
+        if (!fence) fence = marker[1];
+        else if (marker[1][0] === fence[0] && marker[1].length >= fence.length) fence = null;
+      }
+    }
+    if (fence || /^(?: {4}|\t)/.test(lines[lines.length - 1])) return null;
+    // Inline code can span lines. Track matching backtick runs outside fenced blocks.
+    let inlineTicks = 0; let inFence = null;
+    for (const line of lines) {
+      const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+      if (marker) { if (!inFence) inFence = marker[1]; else if (marker[1][0] === inFence[0] && marker[1].length >= inFence.length) inFence = null; inlineTicks = 0; continue; }
+      if (inFence) continue;
+      for (const run of line.matchAll(/\\.|`+/g)) { if (run[0][0] !== '`') continue; if (!inlineTicks) inlineTicks = run[0].length; else if (inlineTicks === run[0].length) inlineTicks = 0; }
+    }
+    return inlineTicks ? null : { start, end: cursor, query: match[1].toLowerCase() };
+  }
+  function hideMentions() { state.mention = null; state.mentionMatches = []; state.mentionIndex = 0; $('mention-list').hidden = true; $('message-input').setAttribute('aria-expanded', 'false'); $('message-input').removeAttribute('aria-activedescendant'); }
+  function updateMentions() {
+    const input = $('message-input');
+    if (!canAssign() || state.projectLoading || state.sending || input.selectionStart !== input.selectionEnd || state.selectedAssignees.length >= 8) { hideMentions(); return; }
+    const mention = mentionAtCursor(input.value, input.selectionStart);
+    if (!mention) { hideMentions(); return; }
+    const previous = state.mention; state.mention = mention;
+    state.mentionMatches = state.assignableMembers.filter(member => member.is_active !== false && !state.selectedAssignees.some(user => String(user.id) === String(member.id)) && `${member.username || ''} ${name(member)}`.toLowerCase().includes(mention.query)).slice(0, 8);
+    if (!previous || previous.query !== mention.query || previous.start !== mention.start) state.mentionIndex = 0;
+    state.mentionIndex = Math.min(state.mentionIndex, Math.max(0, state.mentionMatches.length - 1)); renderMentions();
+  }
+  function renderMentions() {
+    const list = $('mention-list'); list.replaceChildren(); list.hidden = !state.mention; $('message-input').setAttribute('aria-expanded', state.mention ? 'true' : 'false');
+    if (!state.mention) return;
+    if (!state.mentionMatches.length) { list.append(el('p', 'empty-small', state.delegationLoading ? '正在加载成员…' : state.delegationError ? '成员加载失败，请在任务栏刷新后重试。' : '没有匹配的可分派成员。未选择成员时，@ 会作为普通文字发送。')); $('message-input').removeAttribute('aria-activedescendant'); return; }
+    state.mentionMatches.forEach((member, index) => {
+      const option = button('', `mention-option${index === state.mentionIndex ? ' selected' : ''}`, () => chooseAssignee(member)); option.id = `mention-option-${index}`; option.setAttribute('role', 'option'); option.setAttribute('aria-selected', String(index === state.mentionIndex)); option.tabIndex = -1;
+      const info = el('span', 'mention-info'); info.append(el('strong', '', name(member)), el('small', '', `@${member.username}`)); option.append(avatar(member), info, el('span', 'mention-action', '分派'));
+      option.addEventListener('mousedown', event => event.preventDefault()); list.append(option);
+    });
+    $('message-input').setAttribute('aria-activedescendant', `mention-option-${state.mentionIndex}`);
+  }
+  function chooseAssignee(member) {
+    if (!canAssign() || state.sending || state.selectedAssignees.length >= 8 || state.selectedAssignees.some(user => String(user.id) === String(member.id))) return;
+    const input = $('message-input'); const mention = state.mention;
+    if (!mention || !state.assignableMembers.some(user => String(user.id) === String(member.id))) return;
+    input.setRangeText('', mention.start, mention.end, 'end'); state.selectedAssignees.push(member); hideMentions(); renderAssignees(); updateComposer(); input.focus();
+  }
+  function handleMentionKey(event) {
+    if (event.isComposing || !state.mention || event.ctrlKey || event.metaKey || event.altKey) return false;
+    if (event.key === 'Escape') { event.preventDefault(); hideMentions(); return true; }
+    if (!state.mentionMatches.length) return false;
+    if (['ArrowUp', 'ArrowDown'].includes(event.key)) { event.preventDefault(); state.mentionIndex = (state.mentionIndex + (event.key === 'ArrowDown' ? 1 : -1) + state.mentionMatches.length) % state.mentionMatches.length; renderMentions(); return true; }
+    if (!event.shiftKey && (event.key === 'Enter' || event.key === 'Tab')) { event.preventDefault(); chooseAssignee(state.mentionMatches[state.mentionIndex]); return true; }
+    return false;
+  }
+  function renderAssignees() {
+    const list = $('assignment-chips'); list.replaceChildren(); $('assignment-panel').hidden = !state.selectedAssignees.length;
+    if (state.selectedAssignees.length) list.append(el('span', 'assignment-label', '分派给'));
+    state.selectedAssignees.forEach(member => { const chip = el('span', 'assignment-chip'); const remove = iconButton(`移除 ${name(member)}`, 'close', () => { state.selectedAssignees = state.selectedAssignees.filter(user => String(user.id) !== String(member.id)); renderAssignees(); updateComposer(); $('message-input').focus(); }); remove.disabled = state.sending; chip.append(avatar(member), el('span', '', `@${member.username}`), remove); list.append(chip); });
+  }
+  function delegationStatus(task) { return task.status === 'completed' ? '已汇总' : task.status === 'cancelled' ? '已取消' : task.active_turn || task.session_status === 'running' ? '助手处理中' : Number(task.queued_count) > 0 ? '排队中' : '讨论中'; }
+  function delegationCard(task, compact = false) {
+    const card = el('article', `delegation-card${compact ? ' compact' : ''}`); card.dataset.delegationId = task.id;
+    const head = el('div', 'delegation-card-heading'); head.append(el('strong', '', task.title || '协作任务'), el('span', `delegation-status ${task.status}`, delegationStatus(task))); card.append(head);
+    card.append(el('p', 'delegation-assignees', `${(task.assignees || []).map(user => `@${user.username || name(user)}`).join('、')} · 专用助手`));
+    if (!compact) card.append(el('p', 'delegation-card-note', task.status === 'completed' ? '最终摘要已交给主会话，完整讨论保留在子会话。' : task.status === 'cancelled' ? '任务已取消，讨论记录仍可查看。' : '独立会话 · 项目成员可查看'));
+    if (task.status === 'completed' && task.merge_turn?.status) card.append(el('p', 'delegation-merge-state', `主会话整合：${labels[task.merge_turn.status] || task.merge_turn.status}`));
+    const current = String(state.project?.id) === String(task.child_project_id); const open = button(current ? '正在查看' : '打开协作会话', 'quiet-btn delegation-open', () => openDelegation(task), 'arrow'); open.disabled = current; card.append(open); return card;
+  }
+  function renderDelegations() {
+    const list = $('delegation-list'); list.replaceChildren(); const tasks = [...state.delegations.values()].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    if (state.delegationError) list.append(el('p', 'empty-small', state.delegationError), button('重新加载', 'quiet-btn', () => loadDelegations(), 'refresh'));
+    else if (!tasks.length) list.append(el('p', 'empty-small', state.delegationLoading ? '正在加载任务…' : '暂无协作任务。在主会话输入 @ 选择成员。'));
+    tasks.forEach(task => list.append(delegationCard(task, true)));
+  }
+  async function loadDelegations(quiet = false) {
+    if (!state.project) return; const epoch = state.epoch; const pid = parentProjectId(); state.delegationLoading = true; if (!quiet) renderDelegations();
+    try {
+      const data = await api(projectAPI('/delegations', pid)); if (epoch !== state.epoch) return;
+      state.delegationError = ''; state.delegations = new Map((data.delegations || []).map(task => [String(task.id), task])); state.assignableMembers = data.assignable_members || [];
+      // Membership changes invalidate selected recipients before anything is sent.
+      state.selectedAssignees = state.selectedAssignees.filter(member => state.assignableMembers.some(user => String(user.id) === String(member.id))); renderAssignees();
+      if (state.project.parent_project_id) { const task = [...state.delegations.values()].find(task => String(task.child_project_id) === String(state.project.id)); if (task) state.project.delegation = task; }
+      else preserveScroll(() => { state.messages.forEach(message => { if (message.delegation) renderMessage(message); }); });
+    } catch (err) { if (epoch === state.epoch) state.delegationError = err.message; }
+    finally { if (epoch === state.epoch) { state.delegationLoading = false; renderDelegations(); renderChildSession(); updateComposer(); updateMentions(); } }
+  }
+  function updateDelegation(task) {
+    if (!task?.id) return; const old = state.delegations.get(String(task.id)); state.delegations.set(String(task.id), { ...old, ...task });
+    if (state.project?.parent_project_id && String(task.child_project_id) === String(state.project.id)) state.project.delegation = { ...state.project.delegation, ...task };
+    preserveScroll(() => { state.messages.forEach(message => { if (message.role === 'user' && ((task.merge_turn_id && String(message.turn_id) === String(task.merge_turn_id)) || String(message.merge_delegation?.id) === String(task.id))) { message.merge_delegation = { ...message.merge_delegation, ...task }; renderMessage(message); } else if (String(message.delegation?.id) === String(task.id)) renderMessage(message); }); }); renderDelegations(); renderChildSession(); updateComposer();
+  }
+  function openDelegation(task) { return selectProject(task.child_project_id, task.parent_project_id); }
+  function lastCompleteAssistant(messages) { return [...messages].reverse().find(message => message.role === 'assistant' && message.status === 'complete' && String(message.content || '').trim()); }
+  function mergeReadiness(task, project, messages) {
+    if (!task || task.status !== 'open') return '任务已结束，讨论记录保留。';
+    if ((project.active_turn && activeStatuses.has(project.active_turn.status)) || (task.active_turn && activeStatuses.has(task.active_turn.status)) || Number(project.queued_count) > 0 || Number(task.queued_count) > 0) return '请等助手回复和排队消息处理完，再汇总。';
+    if (!lastCompleteAssistant(messages)) return '助手完成一次回复后，才可汇总结果。';
+    return '';
+  }
+  function renderChildSession() {
+    const project = state.project; const task = project?.delegation; $('child-session-bar').hidden = !project?.parent_project_id; if (!project?.parent_project_id) return;
+    $('child-session-info').textContent = task ? `${(task.assignees || []).map(user => `@${user.username || name(user)}`).join('、')} 与专用助手在这里讨论；项目所有成员都能查看。` : '正在打开独立协作会话…';
+    const context = $('child-session-context-body'); const contextKey = JSON.stringify([task?.context, task?.attachment_ids]); $('child-session-context').hidden = !task?.context && !task?.attachments?.length;
+    if (context.dataset.content !== contextKey) { context.dataset.content = contextKey; context.replaceChildren(); if (task?.context) context.append(el('p', '', task.context)); if (task?.attachments?.length) { const files = el('div', 'message-attachments'); task.attachments.forEach(file => files.append(button(file.name, 'attachment-chip', () => openFile(file), 'paper'))); context.append(files); } }
+    $('child-session-status').textContent = task ? delegationStatus(task) : '正在加载'; $('child-session-status').className = `delegation-status ${task?.status || ''}`;
+    const manage = canManageDelegation(task); const reason = mergeReadiness(task, project, sortedMessages());
+    $('finish-delegation').hidden = !manage || task?.status !== 'open'; $('cancel-delegation').hidden = !manage || task?.status !== 'open';
+    $('finish-delegation').disabled = !!reason || state.delegationBusy; $('finish-delegation').title = reason || '编辑最终摘要并交给主会话'; $('cancel-delegation').disabled = state.delegationBusy;
+    $('child-session-help').textContent = !task ? '' : task.status !== 'open' ? task.status === 'completed' ? `最终摘要已提交主会话${task.merge_turn?.status ? `（${labels[task.merge_turn.status] || task.merge_turn.status}）` : ''}，此会话已只读。` : '任务已取消，此会话已只读。' : !canWrite() ? '你可以查看此会话。被分派成员、发起人和项目管理员可以讨论。' : reason || '只把最终摘要和成果引用带回主会话。';
+  }
+  function finishDelegation() {
+    const task = state.project?.delegation; if (!canManageDelegation(task) || mergeReadiness(task, state.project, sortedMessages())) return;
+    const epoch = state.epoch; const last = lastCompleteAssistant(sortedMessages()); const client_id = uuid();
+    openDialog('完成任务并汇总', '协作任务', body => { body.append(el('p', 'form-help', '确认最终结论和成果链接。主会话只接收这份摘要，完整讨论留在此会话。')); field(body, '最终摘要', 'delegation-summary', { tag: 'textarea', required: true, maxLength: 12000, value: String(last.content).slice(0, 12000) }); }, async () => {
+      const summary = $('delegation-summary').value.trim(); if (!summary) throw new Error('请填写最终摘要。');
+      const data = await api(projectAPI(`/delegations/${encodeURIComponent(task.id)}/merge`, task.parent_project_id), { method: 'POST', body: { summary, client_id } });
+      if (epoch !== state.epoch) return; updateDelegation(data.delegation); toast('最终摘要已提交主会话，等待助手整合。'); await selectProject(task.parent_project_id);
+    }, '提交摘要');
+  }
+  function cancelDelegation() {
+    const task = state.project?.delegation; if (!canManageDelegation(task) || task.status !== 'open') return; const epoch = state.epoch;
+    openDialog('取消协作任务', '协作任务', body => { body.append(el('p', 'form-help', '停止此会话的助手和排队任务，保留讨论记录。主会话继续运行。')); }, async () => {
+      const data = await api(projectAPI(`/delegations/${encodeURIComponent(task.id)}/cancel`, task.parent_project_id), { method: 'POST', body: {} });
+      if (epoch !== state.epoch) return; updateDelegation(data.delegation); toast('协作任务已取消，讨论记录已保留。'); refreshProjectMetaSoon();
+    }, '确认取消任务');
+  }
+  function updateComposer() {
+    const available = canWrite() && !state.projectLoading; const assigning = state.selectedAssignees.length > 0;
+    $('message-input').disabled = !available || (assigning && state.sending); $('attach-button').disabled = !available || state.sending || state.uploading > 0; $('assignment-context').disabled = !available || state.sending;
+    $('send-message').disabled = !available || state.sending || state.uploading > 0 || (!$('message-input').value.trim() && (assigning || !state.attachments.length)); $('send-message-label').textContent = assigning ? '分派任务' : '发送';
+    $('message-input').placeholder = !canWrite() && state.project ? '此会话只读' : assigning ? '描述任务目标、交付成果和约束…' : canAssign() ? '发送消息，@ 成员分派任务，或粘贴图片…' : '发送消息，或粘贴图片…';
+    $('composer-note').textContent = !available && state.project && !state.projectLoading ? '只读权限' : state.sending ? '正在发送…' : assigning ? `已选择 ${state.selectedAssignees.length} 位成员 · 共用一个独立会话` : canAssign() ? '输入 @ 并选择成员后分派任务 · Ctrl/Cmd+Enter 发送' : '';
+  }
   function nearBottom() { const c = $('conversation'); return c.scrollHeight - c.scrollTop - c.clientHeight < 110; }
   function scrollBottom() { requestAnimationFrame(() => { const c = $('conversation'); c.scrollTop = c.scrollHeight; $('jump-latest').hidden = true; }); }
   function preserveScroll(fn, force = false) { const bottom = nearBottom(); fn(); if (bottom || force) scrollBottom(); else $('jump-latest').hidden = false; }
   function sortedMessages() { return [...state.messages.values()].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)) || String(a.id).localeCompare(String(b.id))); }
-  function renderMessages() { const msgs = sortedMessages(); $('messages').replaceChildren(); msgs.forEach(m => $('messages').append(messageNode(m))); $('conversation-empty').hidden = !!msgs.length; $('load-history').hidden = !state.historyMore || !msgs.length; }
-  function renderMessage(m) { const old = $('messages').querySelector(`[data-message-id="${CSS.escape(String(m.id))}"]`); const n = messageNode(m); if (old) old.replaceWith(n); else { const next = sortedMessages().find(x => String(x.created_at) > String(m.created_at)); const nextNode = next && $('messages').querySelector(`[data-message-id="${CSS.escape(String(next.id))}"]`); $('messages').insertBefore(n, nextNode || null); } $('conversation-empty').hidden = true; }
+  function renderMessages() { const msgs = sortedMessages(); $('messages').replaceChildren(); msgs.forEach(m => $('messages').append(messageNode(m))); $('conversation-empty').hidden = !!msgs.length; $('load-history').hidden = !state.historyMore || !msgs.length; renderChildSession(); }
+  function renderMessage(m) { const old = $('messages').querySelector(`[data-message-id="${CSS.escape(String(m.id))}"]`); const n = messageNode(m); if (old) old.replaceWith(n); else { const next = sortedMessages().find(x => String(x.created_at) > String(m.created_at)); const nextNode = next && $('messages').querySelector(`[data-message-id="${CSS.escape(String(next.id))}"]`); $('messages').insertBefore(n, nextNode || null); } $('conversation-empty').hidden = true; renderChildSession(); }
   function safeHref(href) {
     let path = href.startsWith('<') && href.endsWith('>') ? href.slice(1, -1) : href;
     path = path.replace(/\\([\\()[\]<> ])/g, '$1');
@@ -217,18 +381,25 @@
       chunk.split(/\n\s*\n/).filter(Boolean).forEach(block => { if (/^#{1,4} /.test(block) && !block.includes('\n')) { const h = el('h3'); inline(h, block.replace(/^#{1,4} /, '')); body.append(h); } else if (block.split('\n').every(l => /^\s*(?:[-*]|\d+\.)\s/.test(l))) { const list = el(/^\s*\d+\./.test(block) ? 'ol' : 'ul'); block.split('\n').forEach(l => { const item = el('li'); inline(item, l.replace(/^\s*(?:[-*]|\d+\.)\s/, '')); list.append(item); }); body.append(list); } else { const p = el('p'); inline(p, block); body.append(p); } });
     }); return body;
   }
+  function visibleMessageContent(message) {
+    const task = message.merge_delegation;
+    return task ? `协作结果${task.title ? `：${task.title}` : ''}\n\n${task.summary || ''}`.trim() : String(message.content || '');
+  }
   function messageNode(m) {
     const node = el('article', `message ${m.role || 'user'}${m.status === 'running' && m.role === 'assistant' ? ' streaming' : ''}`); node.dataset.messageId = m.id;
     const a = m.role === 'user' ? avatar(m.author, 'message-avatar') : el('span', 'avatar message-avatar'); if (m.role !== 'user') a.append(icon(m.role === 'system' ? 'notebook' : 'spark')); node.append(a);
     const body = el('div', 'message-body'); const meta = el('div', 'message-meta'); meta.append(el('strong', 'message-author', m.role === 'assistant' ? (providerNames[state.project?.provider] || '研究助手') : m.role === 'system' ? '工作空间' : name(m.author)), el('time', 'message-time', when(m.created_at)));
     if (m.status && m.status !== 'complete') meta.append(el('span', `message-status ${m.status}`, labels[m.status] || m.status)); body.append(meta);
-    body.append(markdown(m.content || (m.role === 'assistant' && m.status === 'queued' ? '等待前面的任务完成…' : '')));
+    const content = visibleMessageContent(m);
+    body.append(markdown(content || (m.role === 'assistant' && m.status === 'queued' ? '等待前面的任务完成…' : '')));
+    if (m.merge_delegation) body.append(button('查看完整协作会话', 'quiet-btn delegation-open', () => openDelegation(m.merge_delegation), 'arrow'));
+    if (m.delegation) body.append(delegationCard(state.delegations.get(String(m.delegation.id)) || m.delegation));
     if (m.attachments?.length) { const files = el('div', 'message-attachments'); m.attachments.forEach(f => { const b = button('', 'attachment-chip', () => openFile(f)); b.append(icon('paper'), el('span', '', f.name), el('small', '', bytes(f.size))); files.append(b); }); body.append(files); }
     if (m.error) body.append(el('div', 'message-error', m.error));
     const t = state.turns.get(String(m.turn_id)) || { id: m.turn_id, status: m.status, author_id: m.author?.id };
     if (m.role === 'assistant' && state.tools.has(String(m.turn_id))) { const ts = el('div', 'tool-events'); state.tools.get(String(m.turn_id)).slice(-6).forEach(tool => { const detail = el('details', 'tool-event'); const summary = el('summary'); summary.append(icon(tool.status === 'complete' ? 'check' : 'tool'), el('span', '', `${tool.name || '工具'} · ${labels[tool.status] || tool.status || '处理中'}`)); detail.append(summary); if (tool.content) detail.append(el('pre', '', String(tool.content).slice(0, 6000))); ts.append(detail); }); body.append(ts); }
     const actions = el('div', 'message-actions');
-    if (String(m.content || '').trim()) actions.append(button('复制', 'quiet-btn message-copy', () => copyMessageText(String(m.content))));
+    if (content.trim()) actions.append(button('复制', 'quiet-btn message-copy', () => copyMessageText(content)));
     if (m.turn_id && m.role === 'user' && activeStatuses.has(t.status) && canCancel(t)) actions.append(button(t.status === 'queued' ? '取消排队' : '停止任务', 'quiet-btn', () => cancelTurn(t.id), 'stop'));
     if (m.turn_id && m.role === 'user' && ['failed', 'interrupted', 'cancelled'].includes(t.status) && canRetry(t)) actions.append(button('重新尝试', 'quiet-btn', () => retryTurn(t.id), 'refresh'));
     if (actions.childElementCount) body.append(actions);
@@ -237,11 +408,20 @@
   async function loadHistory() { if (!state.project || state.loadingHistory || !state.historyMore) return; const msgs = sortedMessages(); if (!msgs.length) return; const epoch = state.epoch; const c = $('conversation'); const beforeHeight = c.scrollHeight; state.loadingHistory = true; $('load-history').disabled = true; try { const d = await api(projectAPI(`/messages?before=${encodeURIComponent(msgs[0].created_at)}&limit=100`)); if (epoch !== state.epoch) return; const oldTop = c.scrollTop; const n = (d.messages || []).length; (d.messages || []).forEach(m => state.messages.set(String(m.id), m)); state.historyMore = n >= 100; renderMessages(); c.scrollTop = oldTop + c.scrollHeight - beforeHeight; } catch (err) { toast(err.message, 'error'); } finally { state.loadingHistory = false; $('load-history').disabled = false; } }
   async function sendMessage(event) {
     event?.preventDefault(); if (!canWrite() || state.sending || state.uploading || state.projectLoading) return; const content = $('message-input').value.trim(); const attachment_ids = state.attachments.map(f => f.id); if (!content && !attachment_ids.length) return;
-    const pid = state.project.id; const epoch = state.epoch; const signature = JSON.stringify({ pid, content, attachment_ids }); if (!state.pendingSend || state.pendingSend.signature !== signature) state.pendingSend = { signature, client_id: uuid() };
-    const client_id = state.pendingSend.client_id; state.sending = true; updateComposer();
-    try { const d = await api(projectAPI('/messages', pid), { method: 'POST', body: { content, attachment_ids, client_id } }); if (epoch !== state.epoch) return; state.pendingSend = null; state.messages.set(String(d.message.id), d.message); if (d.turn) updateTurn(d.turn); preserveScroll(() => renderMessage(d.message), true); if ($('message-input').value.trim() === content) { $('message-input').value = ''; $('message-input').style.height = ''; } state.attachments = []; renderUploads(); $('message-input').focus(); }
+    const assignee_ids = state.selectedAssignees.map(user => user.id); const assigning = assignee_ids.length > 0;
+    if (assigning && (!canAssign() || !content)) return;
+    if (assigning && content.length > 12000) { toast('任务说明最多 12000 字，请精简后再分派。', 'error'); return; }
+    if (assigning && attachment_ids.length > 12) { toast('每项协作任务最多附带 12 个文件，请先移除多余附件。', 'error'); return; }
+    const context = assigning ? $('assignment-context').value.trim() : ''; const pid = state.project.id; const epoch = state.epoch; const signature = JSON.stringify({ pid, content, attachment_ids, assignee_ids, context }); if (!state.pendingSend || state.pendingSend.signature !== signature) state.pendingSend = { signature, client_id: uuid() };
+    const client_id = state.pendingSend.client_id; state.sending = true; hideMentions(); renderAssignees(); updateComposer();
+    try {
+      const d = await api(projectAPI(assigning ? '/delegations' : '/messages', pid), { method: 'POST', body: { content, attachment_ids, client_id, ...(assigning ? { assignee_ids, context } : {}) } }); if (epoch !== state.epoch) return;
+      state.pendingSend = null; state.messages.set(String(d.message.id), d.message); if (d.turn && !assigning) updateTurn(d.turn); if (d.delegation) updateDelegation(d.delegation); preserveScroll(() => renderMessage(d.message), true);
+      if ($('message-input').value.trim() === content) { $('message-input').value = ''; $('message-input').style.height = ''; } state.attachments = []; state.selectedAssignees = []; $('assignment-context').value = ''; renderAssignees(); renderUploads();
+      if (assigning && d.delegation) { toast('已建立协作会话，项目成员都能查看。'); await openDelegation(d.delegation); } else $('message-input').focus();
+    }
     catch (err) { toast(`${err.message} 消息已保留，再次发送会安全重试。`, 'error'); }
-    finally { if (epoch === state.epoch) { state.sending = false; updateComposer(); } }
+    finally { if (epoch === state.epoch) { state.sending = false; renderAssignees(); updateComposer(); } }
   }
   async function cancelTurn(id) { try { await api(projectAPI(`/turns/${encodeURIComponent(id)}/cancel`), { method: 'POST', body: {} }); toast('已发出停止请求。'); } catch (err) { toast(err.message, 'error'); } }
   async function retryTurn(id) { const pid = state.project?.id; const epoch = state.epoch; try { const d = await api(projectAPI(`/turns/${encodeURIComponent(id)}/retry`, pid), { method: 'POST', body: { client_id: uuid() } }); if (epoch !== state.epoch) return; if (d.turn) updateTurn(d.turn); if (d.message) { state.messages.set(String(d.message.id), d.message); preserveScroll(() => renderMessage(d.message), true); } toast('已重新加入任务队列。'); } catch (err) { toast(err.message, 'error'); } }
@@ -438,11 +618,11 @@
   function scheduleInsights() { clearTimeout(state.insightTimer); state.insightTimer = setTimeout(() => loadInsights(), 180); }
   function normalizePresence(payload) { const p = payload?.members || payload?.users || payload?.online || payload?.online_users || (Array.isArray(payload) ? payload : []); return p.map(x => typeof x === 'object' ? (x.user || x) : state.members.find(m => String(m.id) === String(x))).filter(Boolean); }
   function renderPresence() { $('presence').replaceChildren(); const online = state.presence; online.slice(0, 4).forEach(u => $('presence').append(avatar(u))); if (online.length) $('presence').append(el('span', 'presence-label', `${online.length} 人在线`)); }
-  function renderMembers() { $('member-list').replaceChildren(); if (!state.members.length) $('member-list').append(el('p', 'empty-small', '尚无成员信息。')); state.members.forEach(m => { const online = state.presence.some(u => String(u.id) === String(m.id)); const row = el('div', `member-row${online ? ' online' : ''}`); const info = el('div', 'member-info'); info.append(el('strong', '', name(m)), el('small', '', online ? '在线' : `@${m.username}`)); row.append(avatar(m), info, el('span', 'member-role', roles[m.role] || m.role)); if (isOwner() && m.role !== 'owner' && String(m.id) !== String(state.user.id)) row.append(iconButton('移除成员', 'close', () => removeMember(m))); $('member-list').append(row); }); }
+  function renderMembers() { $('member-list').replaceChildren(); if (!state.members.length) $('member-list').append(el('p', 'empty-small', '尚无成员信息。')); state.members.forEach(m => { const online = state.presence.some(u => String(u.id) === String(m.id)); const row = el('div', `member-row${online ? ' online' : ''}`); const info = el('div', 'member-info'); info.append(el('strong', '', name(m)), el('small', '', online ? '在线' : `@${m.username}`)); row.append(avatar(m), info, el('span', 'member-role', roles[m.role] || m.role)); if (isOwner() && !state.project?.parent_project_id && m.role !== 'owner' && String(m.id) !== String(state.user.id)) row.append(iconButton('移除成员', 'close', () => removeMember(m))); $('member-list').append(row); }); }
   async function refreshMembers() { const epoch = state.epoch; try { const d = await api(projectAPI('/members')); if (epoch !== state.epoch) return; state.members = d.members || []; renderMembers(); } catch (err) { toast(err.message, 'error'); } }
   async function removeMember(member) { openDialog('移除项目成员', 'PROJECT MEMBERS', body => { body.append(el('p', 'form-help', `移除 ${name(member)} 后，对方将无法访问这个项目。已有讨论会保留。`)); }, async () => { await api(projectAPI(`/members/${encodeURIComponent(member.id)}`), { method: 'DELETE' }); await refreshMembers(); toast('已移除成员。'); }, '确认移除'); }
-  function renderTab() { ['files', 'insights', 'activity', 'members'].forEach(t => { $(`tab-${t}`).classList.toggle('active', state.tab === t); $(`tab-${t}`).setAttribute('aria-selected', state.tab === t ? 'true' : 'false'); $(`panel-${t}`).hidden = !state.project || state.tab !== t; }); $('inspector-empty').hidden = !!state.project; if (state.tab === 'insights') renderInsights(); }
-  function activityDescription(event) { const p = event.payload || {}; const author = p.message?.author || p.user || p.author; const who = author ? name(author) : ''; const type = event.type; if (type === 'message.created') return `${who || (p.message?.role === 'assistant' ? providerNames[state.project?.provider] || '助手' : '成员')} ${p.message?.role === 'assistant' ? '开始回复' : '加入了一条讨论'}`; if (type === 'message.updated') return '更新了一条讨论'; if (type === 'turn.updated') return `研究任务${labels[p.turn?.status] || '已更新'}`; if (type === 'file.created') return `上传了 ${p.file?.name || '一个文件'}`; if (type === 'member.updated') return '项目成员已更新'; if (type === 'project.updated') return '项目设置已更新'; if (type === 'agent.tool') return `${p.name || '工具'} · ${labels[p.status] || p.status || '运行中'}`; return '工作空间已更新'; }
+  function renderTab() { ['files', 'insights', 'activity', 'tasks', 'members'].forEach(t => { $(`tab-${t}`).classList.toggle('active', state.tab === t); $(`tab-${t}`).setAttribute('aria-selected', state.tab === t ? 'true' : 'false'); $(`panel-${t}`).hidden = !state.project || state.tab !== t; }); $('inspector-empty').hidden = !!state.project; if (state.tab === 'insights') renderInsights(); if (state.tab === 'tasks') renderDelegations(); }
+  function activityDescription(event) { const p = event.payload || {}; const author = p.message?.author || p.user || p.author; const who = author ? name(author) : ''; const type = event.type; if (type === 'delegation.created') return '分派了一项协作任务'; if (type === 'delegation.updated') return `协作任务${p.delegation ? delegationStatus(p.delegation) : '已更新'}`; if (type === 'message.created') return `${who || (p.message?.role === 'assistant' ? providerNames[state.project?.provider] || '助手' : '成员')} ${p.message?.role === 'assistant' ? '开始回复' : '加入了一条讨论'}`; if (type === 'message.updated') return '更新了一条讨论'; if (type === 'turn.updated') return `研究任务${labels[p.turn?.status] || '已更新'}`; if (type === 'file.created') return `上传了 ${p.file?.name || '一个文件'}`; if (type === 'member.updated') return '项目成员已更新'; if (type === 'project.updated') return '项目设置已更新'; if (type === 'agent.tool') return `${p.name || '工具'} · ${labels[p.status] || p.status || '运行中'}`; return '工作空间已更新'; }
   function renderActivity() { const list = state.activity.filter(e => !['presence', 'agent.delta', 'message.updated'].includes(e.type)).slice(-70).reverse(); $('activity-list').replaceChildren(); if (!list.length) $('activity-list').append(el('p', 'empty-small', '研究的每一步，会在这里留下记录。')); list.forEach(e => { const row = el('div', 'activity-entry'); const mark = el('span', 'activity-icon'); mark.append(icon(e.type === 'file.created' ? 'paper' : e.type === 'member.updated' ? 'users' : e.type === 'turn.updated' ? 'check' : e.type === 'agent.tool' ? 'tool' : 'notebook')); const info = el('div'); info.append(el('p', '', activityDescription(e)), el('small', '', when(e.created_at))); row.append(mark, info); $('activity-list').append(row); }); }
   async function loadActivity() { if (!state.project) return; const epoch = state.epoch; try { const d = await api(projectAPI('/activity?after=0')); if (epoch !== state.epoch) return; const merged = new Map(state.activity.map(e => [String(e.id), e])); (d.events || []).forEach(e => merged.set(String(e.id), e)); state.activity = [...merged.values()].sort((a, b) => Number(a.id) - Number(b.id)).slice(-300); renderActivity(); } catch (err) { if (epoch === state.epoch) $('activity-list').replaceChildren(el('p', 'empty-small', err.message), button('重试', 'quiet-btn', loadActivity, 'refresh')); } }
   async function heartbeat(epoch) { if (epoch !== state.epoch || !state.project || document.hidden) return; const pid = state.project.id; try { await api(projectAPI('/presence', pid), { method: 'POST', body: {} }); } catch (err) { if (epoch === state.epoch && (err.status === 404 || err.status === 403)) await projectUnavailable(pid); } }
@@ -477,7 +657,7 @@
     if (epoch !== state.epoch || !state.project || !state.user) return; if (state.source) state.source.close(); const source = new EventSource(`/api${projectAPI(`/events?after=${state.cursor}`)}`, { withCredentials: true }); state.source = source;
     source.onopen = () => { if (epoch !== state.epoch) return; state.reconnectDelay = 1200; };
     const handle = evt => { if (epoch !== state.epoch) return; let event; try { event = JSON.parse(evt.data); } catch (_) { return; } state.lastStreamEvent = Date.now(); setConnection('connected', '实时同步'); acceptEvent({ ...event, id: event.id || evt.lastEventId }); };
-    source.onmessage = handle; ['message.created', 'message.updated', 'turn.updated', 'agent.delta', 'agent.tool', 'project.updated', 'file.created', 'artifact.changed', 'insights.updated', 'research.updated', 'member.updated', 'presence'].forEach(type => source.addEventListener(type, handle));
+    source.onmessage = handle; ['message.created', 'message.updated', 'turn.updated', 'agent.delta', 'agent.tool', 'project.updated', 'file.created', 'artifact.changed', 'insights.updated', 'research.updated', 'member.updated', 'presence', 'delegation.created', 'delegation.updated'].forEach(type => source.addEventListener(type, handle));
     source.onerror = () => { if (epoch !== state.epoch || !state.user) return; source.close(); if (state.source === source) state.source = null; setConnection('reconnecting', '正在重新连接'); clearTimeout(state.reconnectTimer); state.reconnectTimer = setTimeout(() => connectEvents(epoch), state.reconnectDelay); state.reconnectDelay = Math.min(15000, state.reconnectDelay * 1.6); };
   }
   function applyEvent(event) {
@@ -486,11 +666,12 @@
     if (type === 'message.created' || type === 'message.updated') { const m = p.message || p; if (!m.id) return; const old = state.messages.get(String(m.id)); const merged = { ...old, ...m }; state.messages.set(String(m.id), merged); preserveScroll(() => renderMessage(merged)); }
     else if (type === 'agent.delta') { let m = state.messages.get(String(p.message_id)); if (!m) { m = { id: p.message_id, role: 'assistant', content: '', status: 'running', created_at: event.created_at, turn_id: p.turn_id || state.project.active_turn?.id }; } m = { ...m, content: `${m.content || ''}${p.delta || ''}`, status: 'running' }; state.messages.set(String(m.id), m); preserveScroll(() => renderMessage(m)); }
     else if (type === 'turn.updated') { const t = p.turn || p; updateTurn(t); preserveScroll(() => { [t.user_message_id, t.assistant_message_id].forEach(id => { const m = state.messages.get(String(id)); if (m) { m.status = t.status; if (t.error && m.role === 'assistant') m.error = t.error; renderMessage(m); } }); }); refreshProjectMetaSoon(); }
-    else if (type === 'project.updated') { const project = p.project || p; state.project = { ...state.project, ...project }; if (project.insights || project.research) state.insights = normalizeInsights(project.insights || project.research); updateProjectInList(state.project); renderHeader(); renderInsights(); }
+    else if (type === 'project.updated') { const project = { ...(p.project || p) }; delete project.role; delete project.parent_role; state.project = { ...state.project, ...project }; if (project.insights || project.research) state.insights = normalizeInsights(project.insights || project.research); updateProjectInList(state.project); renderHeader(); renderInsights(); }
     else if (type === 'file.created') { const f = p.file || p; if (f.id && !state.files.some(x => x.id === f.id)) state.files.unshift(f); renderFiles(); }
     else if (type === 'artifact.changed') { scheduleInsights(); loadWorkspace(state.workspacePath); }
     else if (type === 'insights.updated' || type === 'research.updated') { if (p.insights || p.research) state.insights = normalizeInsights(p.insights || p.research); scheduleInsights(); }
-    else if (type === 'member.updated') { if (p.members) { state.members = p.members; renderMembers(); } else refreshMembers(); }
+    else if (type === 'delegation.created' || type === 'delegation.updated') { updateDelegation(p.delegation || p); }
+    else if (type === 'member.updated') { refreshProjectMetaSoon(); loadDelegations(true); if (p.members) { state.members = p.members; renderMembers(); } else refreshMembers(); }
     else if (type === 'presence') { state.presence = normalizePresence(p); renderPresence(); renderMembers(); }
     else if (type === 'agent.tool') { const id = String(p.turn_id); const list = state.tools.get(id) || []; const current = [...list].reverse().find(x => x.name === p.name && !terminalStatuses.has(x.status)); if (current && p.status !== 'running') Object.assign(current, p); else list.push(p); state.tools.set(id, list.slice(-12)); const m = [...state.messages.values()].find(x => String(x.turn_id) === id && x.role === 'assistant'); if (m) preserveScroll(() => renderMessage(m)); }
   }
@@ -661,14 +842,18 @@
   async function logout() { try { await api('/logout', { method: 'POST', body: {} }); showLogin(); } catch (err) { toast(err.message, 'error'); } }
   $('logout').addEventListener('click', logout); $('password-logout').addEventListener('click', logout);
   $('create-project').addEventListener('click', createProject); $('welcome-create').addEventListener('click', createProject); $('project-settings').addEventListener('click', projectSettings); $('add-member').addEventListener('click', addMember); $('manage-users').addEventListener('click', manageUsers);
-  $('project-search').addEventListener('input', renderProjects); $('composer').addEventListener('submit', sendMessage); $('message-input').addEventListener('input', () => { const t = $('message-input'); t.style.height = 'auto'; t.style.height = `${Math.min(190, t.scrollHeight)}px`; updateComposer(); });
-  $('message-input').addEventListener('keydown', event => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) { event.preventDefault(); sendMessage(); } });
+  $('project-search').addEventListener('input', renderProjects); $('composer').addEventListener('submit', sendMessage); $('message-input').addEventListener('input', () => { const t = $('message-input'); t.style.height = 'auto'; t.style.height = `${Math.min(190, t.scrollHeight)}px`; updateComposer(); updateMentions(); });
+  $('message-input').addEventListener('keydown', event => { if (handleMentionKey(event)) return; if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) { event.preventDefault(); sendMessage(); } });
+  $('message-input').addEventListener('click', updateMentions); $('message-input').addEventListener('keyup', event => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) updateMentions(); });
+  $('message-input').addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== $('message-input') && !$('mention-list').contains(document.activeElement)) hideMentions(); }, 120));
+  $('return-parent').addEventListener('click', () => { if (state.project?.parent_project_id) selectProject(state.project.parent_project_id); });
+  $('finish-delegation').addEventListener('click', finishDelegation); $('cancel-delegation').addEventListener('click', cancelDelegation); $('refresh-delegations').addEventListener('click', () => loadDelegations());
   $('attach-button').addEventListener('click', () => $('file-input').click()); $('file-input').addEventListener('change', e => uploadFiles(e.target.files));
   $('composer').addEventListener('dragover', e => { e.preventDefault(); if (canWrite()) $('composer').classList.add('drag-over'); }); $('composer').addEventListener('dragleave', e => { if (!$('composer').contains(e.relatedTarget)) $('composer').classList.remove('drag-over'); }); $('composer').addEventListener('drop', e => { e.preventDefault(); $('composer').classList.remove('drag-over'); if (e.dataTransfer?.files?.length) uploadFiles(e.dataTransfer.files); });
   $('message-input').addEventListener('paste', handleComposerPaste);
   $('load-history').addEventListener('click', loadHistory); $('conversation').addEventListener('scroll', () => { if (nearBottom()) $('jump-latest').hidden = true; }); $('jump-latest').addEventListener('click', scrollBottom); $('cancel-active').addEventListener('click', () => { if (state.project?.active_turn) cancelTurn(state.project.active_turn.id); });
   $('refresh-files').addEventListener('click', refreshFiles); $('refresh-workspace').addEventListener('click', () => loadWorkspace(state.workspacePath)); $('refresh-insights').addEventListener('click', loadInsights); $('refresh-activity').addEventListener('click', loadActivity);
-  document.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('click', () => { state.tab = b.dataset.tab; renderTab(); if (state.tab === 'activity') renderActivity(); }));
+  document.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('click', () => { state.tab = b.dataset.tab; renderTab(); if (state.tab === 'activity') renderActivity(); if (state.tab === 'tasks') loadDelegations(); }));
   $('open-sidebar').addEventListener('click', () => openDrawer('sidebar')); $('close-sidebar').addEventListener('click', closeDrawers); $('open-inspector').addEventListener('click', () => openDrawer('inspector')); $('close-inspector').addEventListener('click', closeDrawers); $('drawer-scrim').addEventListener('click', closeDrawers);
   $('close-dialog').addEventListener('click', () => { if (!state.dialogBusy) $('form-dialog').close(); }); $('dialog-cancel').addEventListener('click', () => { if (!state.dialogBusy) $('form-dialog').close(); });
   $('form-dialog').addEventListener('cancel', event => { if (state.dialogBusy) event.preventDefault(); });

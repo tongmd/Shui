@@ -31,3 +31,55 @@
 /* Clipboard controls stay visible for keyboard and touch users. */
 .message-actions{display:flex;flex-wrap:wrap;align-items:center;gap:12px}.message-copy{color:var(--muted)}.message-copy:hover{color:var(--ink)}.composer-paste-hint{font-size:11px;color:var(--muted);white-space:nowrap;align-self:center}.preview-dialog .dialog-header h2{min-width:0}.preview-actions{gap:10px}.preview-actions .quiet-btn{white-space:nowrap}.preview-dialog #figure-preview:not([hidden])~.preview-help{display:block;font-size:11px}
 @media(max-width:650px){.composer-paste-hint{font-size:10px}.preview-dialog .dialog-header{gap:8px}.preview-actions{gap:7px}.preview-actions .quiet-btn{font-size:11px}}
+
+/* Visible task assignment and independent collaboration sessions. */
+.composer-wrap{position:relative}
+.inspector-tabs{gap:0;justify-content:space-between;padding-left:18px;padding-right:18px}
+.mention-list{position:absolute;left:30px;right:30px;bottom:calc(100% - 9px);z-index:8;max-height:300px;overflow:auto;padding:6px;background:var(--paper);border:1px solid #ccdacf;border-radius:10px;box-shadow:0 10px 32px #233b2c20}
+.mention-list .empty-small{padding:10px;margin:0}
+.mention-option{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border-radius:6px;text-align:left}
+.mention-option:hover,.mention-option.selected{background:var(--teal-light)}
+.mention-info{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
+.mention-info strong{font-size:12px;font-weight:550;overflow-wrap:anywhere}
+.mention-info small,.mention-action{font-size:10px;color:var(--muted)}
+.mention-action{color:var(--teal)}
+.assignment-panel{border:1px solid #d7e3d9;border-bottom:0;border-radius:10px 10px 0 0;background:#f5f9f5;padding:11px 13px;margin:0 0 -1px}
+.assignment-panel:not([hidden])~.composer{border-top-left-radius:0;border-top-right-radius:0}
+.assignment-panel p{font-size:10px;line-height:1.7;color:var(--muted);margin:8px 0 4px}
+.assignment-panel details{font-size:10px;color:var(--muted)}
+.assignment-panel summary{cursor:pointer;padding:4px 0}
+.assignment-panel textarea{width:100%;resize:vertical;min-height:56px;max-height:130px;padding:8px;margin-top:6px;border:1px solid var(--line);border-radius:6px;background:var(--paper);font-size:11px;line-height:1.7}
+.assignment-chips{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.assignment-label{font-size:10px;color:var(--muted);margin-right:2px}
+.assignment-chip{display:inline-flex;align-items:center;gap:5px;max-width:100%;border-radius:20px;border:1px solid #d3e0d5;padding:3px 4px;background:var(--paper);font-size:10px;color:var(--teal)}
+.assignment-chip>.avatar{width:21px;height:21px;font-size:8px}
+.assignment-chip>span:not(.avatar){overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px}
+.assignment-chip>.icon-btn{width:21px;height:21px}
+.assignment-chip svg{width:12px;height:12px}
+.delegation-list{display:flex;flex-direction:column;gap:11px}
+.delegation-card{border:1px solid #d6e2da;background:#f8fbf8;border-radius:9px;padding:13px 14px;margin-top:12px;overflow-wrap:anywhere}
+.delegation-card.compact{padding:12px;margin-top:0}
+.delegation-card-heading{display:flex;gap:10px;justify-content:space-between;align-items:flex-start}
+.delegation-card-heading>strong{font-size:12px;line-height:1.65;font-weight:550;min-width:0}
+.delegation-card.compact .delegation-card-heading{flex-direction:column;gap:6px}
+.delegation-status{display:inline-flex;align-items:center;white-space:nowrap;flex-shrink:0;font-size:9px;line-height:1.6;border-radius:4px;background:#e7eee8;color:#416b51;padding:3px 6px}
+.delegation-status.completed{background:#e5edf9;color:#43638d}
+.delegation-status.cancelled{background:#eeeae7;color:#817268}
+.delegation-assignees{font-size:10px;line-height:1.7;color:var(--teal);margin:8px 0 4px}
+.delegation-card-note,.delegation-merge-state{font-size:10px;line-height:1.7;color:var(--muted);margin:4px 0}
+.delegation-open{margin:7px 0 -2px -6px;font-size:10px;color:var(--teal)}
+.breadcrumb-parent{font:inherit;text-decoration:underline;text-underline-offset:3px;color:var(--teal);padding:0}
+.child-session-bar{flex-shrink:0;margin:0;padding:10px 34px 12px;border-bottom:1px solid #d6e2da;background:#f5f9f5}
+.child-session-heading{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.child-session-heading .quiet-btn{font-size:11px;margin-left:-6px;color:var(--teal)}
+.child-session-bar>p{font-size:10px;line-height:1.7;color:var(--muted);margin:4px 0 8px;overflow-wrap:anywhere}
+.child-session-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.child-session-actions .btn{padding:6px 9px;font-size:10px;min-height:30px;background:var(--paper)}
+.child-session-actions .quiet-btn{font-size:10px}
+#child-session-help{font-size:9px;color:var(--muted);line-height:1.7;flex:1;min-width:130px}
+#delegation-summary{min-height:190px;max-height:45dvh;font-size:12px;resize:vertical}
+@media(max-width:700px){.mention-list{left:14px;right:14px;max-height:240px}.child-session-bar{padding:9px 18px}.child-session-actions{gap:6px}.assignment-panel{padding:9px 10px}.assignment-panel p{font-size:9px}.delegation-card-heading{flex-wrap:wrap}#child-session-help{flex-basis:100%}.child-session-bar>p{margin-bottom:5px}}
+.child-session-context{margin:3px 0 10px;font-size:10px;color:var(--muted)}
+.child-session-context>summary{cursor:pointer;padding:3px 0}
+#child-session-context-body{max-height:160px;overflow:auto;padding:6px 0}
+#child-session-context-body>p{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8;margin:0}
