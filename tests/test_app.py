@@ -184,6 +184,23 @@ def test_idempotent_messages_and_queue_order(workspace):
     )
 
 
+def test_token_messages_are_stored_and_served_redacted(workspace):
+    app, clients, _, pid = workspace
+    raw = "Use token:secret-token-123456789 to fetch the private result"
+    response = send(clients["editor"], pid, raw, "token-request-01")
+    assert response.status_code == 201
+    payload = response.json()
+    assert "secret-token-123456789" not in json.dumps(payload)
+    assert "token:[redacted]" in payload["message"]["content"]
+    history = clients["editor"].get(f"/api/projects/{pid}/messages").json()
+    assert "secret-token-123456789" not in json.dumps(history)
+    with app.state.store.connect() as c:
+        row = c.execute("SELECT * FROM messages WHERE id=?", (payload["message"]["id"],)).fetchone()
+        assert row["content"] == "Use token:[redacted] to fetch the private result"
+        assert app.state.store.message_content(c, row) == raw
+        assert c.execute("SELECT value FROM message_secrets WHERE message_id=?", (row["id"],)).fetchone()["value"] == "token:secret-token-123456789"
+
+
 def test_research_insights_aggregate_and_validate_figures(workspace):
     app, clients, _, pid = workspace
     owner = clients["owner"]

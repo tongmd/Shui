@@ -1041,6 +1041,9 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             raise HTTPException(400, "Describe the task to assign")
         title = textfield(data, "title", 120) or content.splitlines()[0][:120]
         context = textfield(data, "context", 8000)
+        visible_content, _content_secrets = store.redact_message_tokens(content)
+        visible_title, _title_secrets = store.redact_message_tokens(title)
+        visible_context, _context_secrets = store.redact_message_tokens(context)
         client_id = delegation_request_id(data)
         assignees = data.get("assignee_ids")
         attachments = data.get("attachment_ids", [])
@@ -1061,7 +1064,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                 previous = c.execute("SELECT * FROM delegation_requests WHERE parent_project_id=? AND client_id=? ORDER BY created_at,id", (pid, client_id)).fetchall()
                 if previous:
                     if {r["assignee_id"] for r in previous} != set(assignees) or any(
-                        r["created_by"] != user["id"] or r["content"] != content or r["title"] != title or r["context"] != context or json.loads(r["attachment_ids"]) != attachments for r in previous
+                        r["created_by"] != user["id"] or r["content"] != visible_content or r["title"] != visible_title or r["context"] != visible_context or json.loads(r["attachment_ids"]) != attachments for r in previous
                     ):
                         raise HTTPException(409, "Request ID already belongs to another task assignment")
                     assignments = [delegation_response(c, delegation_row(c, pid, r["delegation_id"], user), user, r) for r in previous]
@@ -1105,20 +1108,20 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                     new_task = task is None
                     if new_task and c.execute("SELECT 1 FROM turns WHERE project_id=? AND status='running'", (child,)).fetchone():
                         raise HTTPException(409, "The previous collaboration task is still stopping; try again shortly")
-                    card = "@" + members[assignee]["username"] + "\n\n" + content
+                    card = "@" + members[assignee]["username"] + "\n\n" + visible_content
                     card_client = client_id if index == 0 else "delegation.card." + rid
                     c.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?)", (mid, pid, "user", card, user["id"], "complete", None, json.dumps(attachments), at, None, card_client))
                     if new_task:
                         did = uid()
                         c.execute("INSERT INTO delegations(id,parent_project_id,child_project_id,parent_message_id,created_by,title,instructions,context,attachment_ids,client_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
-                            did, pid, child, mid, user["id"], title, content, context, json.dumps(attachments), "delegation.task." + did, at, at,
+                            did, pid, child, mid, user["id"], visible_title, visible_content, visible_context, json.dumps(attachments), "delegation.task." + did, at, at,
                         ))
                         c.execute("INSERT INTO delegation_assignees VALUES(?,?)", (did, assignee))
                     else:
                         did = task["id"]
                     queued = store.enqueue_turn(c, child, user, content, [], "delegation.request." + rid, emit=False)
                     c.execute("INSERT INTO delegation_requests VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
-                        rid, did, pid, child, mid, queued["turn"]["id"], user["id"], assignee, client_id, title, content, context, json.dumps(attachments), at,
+                        rid, did, pid, child, mid, queued["turn"]["id"], user["id"], assignee, client_id, visible_title, visible_content, visible_context, json.dumps(attachments), at,
                     ))
                     c.execute("UPDATE delegation_turns SET request_id=? WHERE turn_id=?", (rid, queued["turn"]["id"]))
                     store.publish_enqueued_turn(c, queued["turn"])
@@ -1666,10 +1669,11 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             msg = c.execute(
                 "SELECT * FROM messages WHERE id=?", (t["user_message_id"],)
             ).fetchone()
+            content = store.message_content(c, msg)
         return enqueue(
             pid,
             u,
-            msg["content"],
+            content,
             json.loads(msg["attachments"]),
             textfield(data, "client_id", 100),
             tid,

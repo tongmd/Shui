@@ -111,15 +111,15 @@ progress, and the submitted summary. Task updates also refresh the existing
 child window when new work opens there. Child dialogue and native tool events stay
 on the child event channel. Native histories are neither copied nor forked.
 
-The browser opens child sessions in separate windows using
+The sidebar and task cards open child sessions using
 `/?project={parent_id}&session={child_id}`; parent windows use
 `/?project={parent_id}`. URL state takes precedence over per-window session
-storage. Opening or refreshing a child does not navigate the parent window.
+storage. Separate browser tabs retain their independent session URLs.
 These links contain no credentials and retain the normal login and membership
-checks. Submitting a summary leaves the child window open in read-only mode;
+checks. Submitting a summary leaves the child session in read-only mode;
 the parent receives the integration turn through its existing event stream.
-Windows have stable parent/member names. Opening a later assignment focuses
-the existing window without reloading it or losing unsent discussion drafts.
+Each parent/member pair appears once in the sidebar; later assignments reuse
+that child session and its native history.
 The composer resolves complete known project usernames in typed mentions,
 including mentions adjacent to Chinese text, and submits them through the
 delegation endpoint. It displays resolved recipients before sending. Email,

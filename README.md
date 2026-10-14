@@ -17,8 +17,8 @@ or write a complete project username directly, including Chinese sentences
 such as `跟@memberli看一看这个方案`. Shui shows the matched members and changes
 the send button to **分派任务** before submission. Usernames must match current
 project members; email addresses, URLs, escaped mentions, and code do not assign
-tasks. The original message text is preserved. Shui opens the collaboration session in a
-separate browser window, keeping the main conversation in its original window.
+tasks. The original message text is preserved. Collaboration sessions appear
+under their parent project in the left sidebar, with links on their task cards.
 Each member has one dedicated collaboration session per project. Later tasks
 mentioning the same member return to that session and reuse its native agent
 history. Mentioning multiple members sends work to each member's own session.
@@ -28,11 +28,9 @@ not appended to its context. Add optional focused background when assigning.
 
 When the work is ready, choose **完成并汇总** in the child session, review the
 result summary, and submit it. The summary and artifact references enter the
-main agent's queue for integration. The original main window receives the
-result live, and the child window keeps the completed transcript open.
-Each window has its own shareable session URL and restores the same session
-on refresh. If the browser blocks a new window, use **打开协作窗口** on the
-task card to open it explicitly.
+main agent's queue for integration. The main conversation receives the result
+live, and the child session keeps its completed transcript. Each session has
+its own shareable URL, so browser tabs and refreshes retain the selected session.
 Each member's collaboration uses its own workspace and native session. A new
 task after completion uses the same session, preserving earlier discussion and
 submitted summaries. Child agents are instructed to treat parent files as

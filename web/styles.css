@@ -93,3 +93,9 @@
 .delegation-request-context{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink);font-size:12px;line-height:1.8;margin:10px 0 0}
 
 .download-progress{pointer-events:auto;display:flex;align-items:center;justify-content:space-between;gap:18px}.download-progress .quiet-btn{font-size:12px;flex-shrink:0}
+.child-session-list{display:grid;gap:3px;margin:-2px 0 8px 24px;padding-left:10px;border-left:1px solid #d8e2dc}
+.project-item.child-session-item{margin-bottom:2px;padding:9px 8px;border-radius:7px;background:transparent}
+.project-item.child-session-item:hover{background:#e9f0eb}
+.project-item.child-session-item.active{background:#e0eee6}
+.project-item.child-session-item .project-symbol{width:22px;height:26px}
+.project-item.child-session-item .project-symbol svg{width:16px;height:16px}

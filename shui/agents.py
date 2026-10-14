@@ -156,6 +156,7 @@ class _Redactor:
         for secret in self.values:
             value = value.replace(secret, "[redacted]")
         value = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9_.~+/=-]{8,}", r"\1[redacted]", value)
+        value = re.sub(r"(?i)\b(token:)[^\s`'\"<>]{1,4096}", r"\1[redacted]", value)
         value = re.sub(r"\bsk-[A-Za-z0-9_-]{12,}", "[redacted]", value)
         value = re.sub(r"(https?://)[^\s/@]+:[^\s/@]+@", r"\1[redacted]@", value)
         return value
@@ -171,7 +172,7 @@ class _Redactor:
                     hold = n
                     break
         sensitive_prefix = re.search(
-            r"(?is)(?:bearer\s+|basic\s+)[A-Za-z0-9._~+/=-]{0,256}$", text
+            r"(?is)(?:bearer\s+|basic\s+|token:)[A-Za-z0-9._~+/=-]{0,256}$", text
         )
         if sensitive_prefix:
             hold = max(hold, len(text) - sensitive_prefix.start())
