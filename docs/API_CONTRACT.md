@@ -7,6 +7,7 @@ JSON API under `/api`; all errors `{detail: string}`. Auth cookies are HttpOnly;
 - `GET /api/projects` -> `{projects:[Project]}`. Lists top-level projects; child collaboration sessions are listed through their parent task API.
 - `POST /api/projects {name,description?,provider:'codex'|'claude',model?,native_session_id?,github_url?,overleaf_url?}` -> Project. Owner only. Workspace allocated server-side.
 - `GET /api/projects/{id}` -> `{project:Project,messages:[Message],files:[File],members:[Member],events_cursor:number}`. All shared transcript paginated separately for older content.
+- `GET /api/projects/{id}/meta` -> `{project:Project,members:[Member]}`. Same current membership checks, roles and task metadata as project detail, without messages, files or the research catalog; use for status polling.
 - `PATCH /api/projects/{id} {name?,description?,model?,native_session_id?,github_url?,overleaf_url?}` -> Project. Owner only, session/model changes require idle project. Provider immutable. Explicit native binding must be unique, never create separate session per member.
 - `DELETE /api/projects/{id} {confirm_name}` -> `{ok:true,deleted:id}`. Platform Owner only. The exact project name is required. Shui discussions, uploads, memberships, events and queued turns are deleted after any active task stops; external GitHub/Overleaf resources and native provider history are not deleted.
 - `GET /api/projects/{id}/messages?before={created_at}&limit=100` -> `{messages:[Message]}`.
@@ -58,6 +59,12 @@ unexpected hosts, or extra path components are rejected. These are project
 resource associations, not external membership provisioning.
 
 The project detail response also includes an `insights` aggregate, and `GET /api/projects/{id}/research` returns the same payload. `POST /api/projects/{id}/research` lets owners and editors upsert experiments, figures, claims and results. Figure paths must refer to existing image, SVG or PDF files inside the project workspace. Each item can reference an experiment in that project, and writes emit `research.updated`. Result values are stored as text to preserve their original precision.
+
+Research update events are compact invalidations (`{refresh:true}`), rather than
+full research catalogs. SSE, event-batch and activity also project old stored
+research snapshots to invalidations while preserving event IDs and order. The
+original historical rows remain intact. Clients fetch `/research` when the
+research panel is visible, coalescing multiple notifications into one request.
 
 ## Collaboration tasks
 

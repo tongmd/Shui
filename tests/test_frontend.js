@@ -21,7 +21,7 @@ const code = [
   block('  async function download(', '  function preparePreview('),
 ].join('\n');
 
-function harness(status = 200) {
+function harness(status = 200, extra = {}) {
   const requests = []; const clicks = []; const notices = []; let logins = 0;
   function element(tag, cls, text) {
     return {
@@ -32,7 +32,9 @@ function harness(status = 200) {
       remove() { this.removed = true; },
     };
   }
+  const progress = element('div');
   const context = vm.createContext({
+    AbortController, setTimeout, clearTimeout, $: () => progress,
     URL, encodeURIComponent, state: { project: { id: 'project-123' } },
     location: { href: 'https://shui.example/' }, el: element,
     document: { createTextNode: text => ({ text }), body: element('body') },
@@ -44,10 +46,11 @@ function harness(status = 200) {
     },
     toast: (text, kind) => notices.push({ text, kind }),
     showLogin: () => { logins++; },
+    ...extra,
   });
   vm.runInContext(code, context);
   function render(text) { const parent = element('p'); context.inline(parent, text); return parent.children; }
-  return { context, render, requests, clicks, notices, logins: () => logins };
+  return { context, render, requests, clicks, notices, progress, logins: () => logins };
 }
 
 test('agent file links become authenticated project downloads', () => {
@@ -157,4 +160,25 @@ test('network failure reports a retryable download error', async () => {
   await h.context.download('/api/projects/project-123/artifact?path=report.pdf');
   assert.equal(h.clicks.length, 0);
   assert.ok(h.notices[0].text.includes('连接暂时中断'));
+});
+
+test('repeated download clicks share one preflight while a visible preparation notice is shown', async () => {
+  let release; let fetches = 0; const h = harness(200, { fetch: () => { fetches++; return new Promise(resolve => { release = resolve; }); } });
+  const first = h.context.download('/api/projects/project-123/artifact?path=large.zip', 'large.zip');
+  await h.context.download('/api/projects/project-123/artifact?path=large.zip', 'large.zip');
+  assert.equal(fetches, 1); assert.equal(h.progress.children.length, 1); assert.equal(h.progress.children[0].children[0].text, '正在准备下载…');
+  release({ ok: true, status: 200 }); await first; assert.equal(h.clicks.length, 1); assert.equal(h.progress.children[0].removed, true); assert.equal(h.context.state.pendingDownloads.size, 0);
+});
+
+test('download preflight times out and releases its slot without buffering or launching a GET', async () => {
+  let timeout; const h = harness(200, { setTimeout: callback => { timeout = callback; return 1; }, clearTimeout() {}, fetch: (_url, options) => new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted')))) });
+  const pending = h.context.download('/api/projects/project-123/artifact?path=large.zip'); timeout(); await pending;
+  assert.equal(h.clicks.length, 0); assert.match(h.notices[0].text, /超时/); assert.equal(h.progress.children[0].removed, true); assert.equal(h.context.state.pendingDownloads.size, 0);
+});
+
+test('cancel preparation aborts the pending HEAD without an error toast or file download', async () => {
+  const h = harness(200, { fetch: (_url, options) => new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(new Error('aborted')))) });
+  const pending = h.context.download('/api/projects/project-123/artifact?path=large.zip');
+  const cancel = h.progress.children[0].children.find(node => node.tag === 'button'); cancel.listeners.click(); await pending;
+  assert.equal(h.clicks.length, 0); assert.equal(h.notices.length, 0); assert.equal(h.context.state.pendingDownloads.size, 0);
 });

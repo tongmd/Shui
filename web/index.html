@@ -12,7 +12,7 @@
   <script defer src="/app.js"></script>
 </head>
 <body>
-  <div id="boot" class="boot"><img src="/icon.png" alt="" width="54" height="54"><span>Shui!</span><p>正在打开工作空间…</p></div>
+  <div id="boot" class="boot"><img src="/icon.png" alt="" width="54" height="54"><span>Shui!</span><p id="boot-status" role="status">正在加载页面资源…</p><button id="boot-retry" type="button" class="btn primary" hidden>重试连接</button><a id="boot-reload" class="quiet-btn" href="">重新加载页面</a><noscript><p>请启用 JavaScript 后重新加载页面。</p></noscript></div>
   <section id="login-view" class="login-view" hidden>
     <div class="login-story"><a class="brand" href="/" aria-label="Shui! 首页"><img src="/icon.png" alt="Shui!" width="46" height="46"><span>Shui<span class="brand-bang">!</span></span></a></div>
     <div class="login-form-wrap"><form id="login-form" class="login-form"><h2>登录工作空间</h2><label>账号<input id="login-username" name="username" autocomplete="username" required placeholder="用户名"></label><label>密码<input id="login-password" name="password" type="password" autocomplete="current-password" required placeholder="密码"></label><p id="login-error" class="form-error" role="alert" hidden></p><button class="btn primary login-submit" type="submit">登录</button></form></div>

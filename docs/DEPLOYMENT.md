@@ -75,6 +75,17 @@ For Nginx set `client_max_body_size 51m`, `proxy_buffering off`,
 endpoint emits a heartbeat every 15 seconds and can replay persisted events.
 Use one Uvicorn worker. An additional worker will fail its exclusive data lock.
 
+The browser loads research previews only when the panel and image are visible;
+PDFs are opened explicitly. Hidden tabs release their event stream and catch up
+from the saved cursor on return. This pauses browser traffic, not agent work.
+
+HTTP failures (5xx) and requests taking at least one second produce structured
+`shui.http` warning logs with method, route template, status, time to first byte,
+and total response duration. Query strings, credentials, request bodies and
+concrete file paths are omitted. Normal long-lived SSE connections are excluded
+from the total-duration warning. Compare local and public download timings to
+separate server processing from proxy or network delays.
+
 ## Updates and recovery
 
 Stop the service before taking a consistent backup. Include the entire data

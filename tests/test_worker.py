@@ -368,8 +368,9 @@ async def test_agent_research_manifest_is_upserted_with_stable_ids(queued_app):
             )
         ]
         assert len(events) == 2
-        assert events[0]["insights"]["experiments"][0]["id"] == data["experiments"][0]["id"]
-        assert events[1]["insights"]["experiments"][0]["id"] == data["experiments"][0]["id"]
+        assert all(event["refresh"] for event in events)
+        assert all(event["summary"]["experiment_count"] == 1 for event in events)
+        assert all("insights" not in event for event in events)
     finally:
         await coordinator.close()
 

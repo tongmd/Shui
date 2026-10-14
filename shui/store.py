@@ -64,6 +64,25 @@ class Store:
         finally:
             c.close()
 
+    @contextlib.contextmanager
+    def keep_wal_open(self):
+        """Avoid checkpointing the WAL after every short-lived request connection.
+
+        This connection belongs only to the calling application lifespan. It does
+        no writes and holds no transaction; requests keep their own connections,
+        including requests executed in a worker thread. Keep SQLite's FULL commit
+        durability and automatic checkpoint policy unchanged.
+        """
+        c = sqlite3.connect(self.path, timeout=20, isolation_level=None)
+        try:
+            c.execute("PRAGMA query_only=ON")
+            # Opening alone is lazy: finish a read to attach the connection to WAL.
+            with contextlib.closing(c.execute("SELECT rootpage FROM sqlite_schema LIMIT 1")) as cursor:
+                cursor.fetchall()
+            yield
+        finally:
+            c.close()
+
     def initialize(self):
         with self.connect() as c:
             c.executescript("""
@@ -186,11 +205,45 @@ class Store:
 
     @staticmethod
     def event(c, project_id, kind, payload):
+        if kind in ("research.updated", "insights.updated"):
+            # The authoritative data lives in research tables, not in every event.
+            # Repeating the growing figure catalog made a small project accumulate
+            # hundreds of MB of snapshots and replay them on every reconnect.
+            research = payload.get("insights", payload.get("research", {}))
+            summary = research.get("summary", payload.get("summary", {}))
+            compact = {"refresh": True}
+            if isinstance(summary, dict):
+                compact["summary"] = {
+                    key: value[:4000] if isinstance(value, str) else value
+                    for key, value in summary.items()
+                    if key in {"experiment_count", "figure_count", "claim_count", "validation_count", "result_count", "result_summary", "status", "updated_at"}
+                    and isinstance(value, (str, int, float, type(None)))
+                }
+            if isinstance(payload.get("actor"), str):
+                compact["actor"] = payload["actor"][:80]
+            payload = compact
         cur = c.execute(
             "INSERT INTO events(project_id,type,payload,created_at) VALUES(?,?,?,?)",
             (project_id, kind, json.dumps(payload, ensure_ascii=False), now()),
         )
         return cur.lastrowid
+
+    @staticmethod
+    def read_events(c, project_id, after=0, limit=200, activity=False):
+        # Project legacy snapshots to an invalidation before fetching the payload.
+        # SQLite can then skip their overflow pages instead of reading/parsing MB
+        # only to discard them in Python. Keep stored history and cursor IDs intact.
+        activity_filter = " AND type NOT IN ('agent.delta','presence')" if activity else ""
+        direction = "DESC" if activity else "ASC"
+        rows = c.execute(
+            "SELECT id,project_id,type,CASE WHEN type IN ('research.updated','insights.updated') "
+            "THEN '{\"refresh\":true}' ELSE payload END AS payload,created_at FROM events "
+            f"WHERE project_id=? AND id>?{activity_filter} ORDER BY id {direction} LIMIT ?",
+            (project_id, max(0, after), limit),
+        ).fetchall()
+        if activity:
+            rows.reverse()
+        return [{**dict(row), "payload": json.loads(row["payload"])} for row in rows]
 
     @staticmethod
     def user(row):

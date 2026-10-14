@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -28,6 +29,9 @@ from .worker import Coordinator
 
 COOKIE = "shui_session"
 MAX_UPLOAD = 50 * 1024 * 1024
+HTTP_SLOW_REQUEST_MS = 1000
+http_logger = logging.getLogger("shui.http")
+PUBLIC_ASSETS = frozenset({"app.js", "lucide-icons.js", "styles.css", "icon.svg", "icon.png", "favicon.ico"})
 ACTIVE = ("queued", "running")
 FORBIDDEN_NAMES = {
     ".git",
@@ -230,16 +234,42 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
         else Path(sysconfig.get_path("data")) / "share" / "shui" / "web"
     )
     web = Path(os.environ.get("SHUI_WEB_DIR", str(default_web))).resolve()
+    asset_hashes = {}
+    asset_link = re.compile(
+        r"(?P<attribute>\b(?:src|href)=)(?P<quote>[\"'])(?P<url>/(?:"
+        + "|".join(re.escape(name) for name in sorted(PUBLIC_ASSETS))
+        + r")(?:[?#][^\"']*)?)(?P=quote)"
+    )
+
+    def asset_fingerprint(asset):
+        path = web / asset
+        stat = path.stat()
+        signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        cached = asset_hashes.get(asset)
+        if not cached or cached[0] != signature:
+            cached = (signature, hashlib.sha256(path.read_bytes()).hexdigest())
+            asset_hashes[asset] = cached
+        return path, stat, cached[1]
+
+    def version_asset_link(match):
+        parts = urlsplit(match.group("url"))
+        try:
+            _, _, digest = asset_fingerprint(parts.path.removeprefix("/"))
+        except OSError:
+            return match.group(0)
+        href = parts.path + "?v=" + digest + ("#" + parts.fragment if parts.fragment else "")
+        return match.group("attribute") + match.group("quote") + href + match.group("quote")
 
     @asynccontextmanager
     async def life(app):
-        if start_worker:
-            await coordinator.start()
-        try:
-            yield
-        finally:
+        with store.keep_wal_open():
             if start_worker:
-                await coordinator.close()
+                await coordinator.start()
+            try:
+                yield
+            finally:
+                if start_worker:
+                    await coordinator.close()
 
     app = FastAPI(
         title="Shui!",
@@ -264,8 +294,22 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             "/"
         )
 
+    def log_request(request, status, started, first_byte):
+        route = getattr(request.scope.get("route"), "path", "<unmatched>")
+        finished = time.monotonic()
+        first_ms = (first_byte - started) * 1000
+        total_ms = (finished - started) * 1000
+        # Long-lived event streams are expected; their initial response can still be slow.
+        slow = first_ms >= HTTP_SLOW_REQUEST_MS or (not route.endswith("/events") and total_ms >= HTTP_SLOW_REQUEST_MS)
+        if status >= 500 or slow:
+            http_logger.warning(json.dumps({
+                "route": route, "method": request.method, "status": status,
+                "ttfb_ms": round(first_ms, 2), "total_ms": round(total_ms, 2),
+            }))
+
     @app.middleware("http")
     async def headers(request, call_next):
+        started = time.monotonic()
         length = request.headers.get("content-length")
         if length:
             try:
@@ -274,7 +318,22 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                 return JSONResponse({"detail": "Invalid content length"}, 400)
             if too_large:
                 return JSONResponse({"detail": "Upload exceeds 50 MiB"}, 413)
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception:
+            log_request(request, 500, started, time.monotonic())
+            raise
+        first_byte = time.monotonic()
+        chunks = response.body_iterator
+
+        async def observed_body():
+            try:
+                async for chunk in chunks:
+                    yield chunk
+            finally:
+                log_request(request, response.status_code, started, first_byte)
+
+        response.body_iterator = observed_body()
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "same-origin"
         response.headers["X-Frame-Options"] = "SAMEORIGIN"
@@ -282,7 +341,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; frame-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'",
         )
-        response.headers["Cache-Control"] = "no-store"
+        response.headers.setdefault("Cache-Control", "private, no-store" if request.url.path.startswith("/api/") else "no-store")
         return response
 
     @app.exception_handler(sqlite3.IntegrityError)
@@ -885,6 +944,15 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                 "events_cursor": cursor,
                 "insights": store.research(c, pid),
             }
+
+    @app.get("/api/projects/{pid}/meta")
+    def project_meta(pid: str, request: Request):
+        user, _ = access(request, pid)
+        with store.connect() as c:
+            row = c.execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+            if not row:
+                raise HTTPException(404, "Project not found")
+            return {"project": store.project(c, row, user), "members": store.project_members(c, pid)}
 
     def qualify_summary_links(summary, child, parent):
         # Match the same inline-link syntax as the renderer, leaving code and web URLs intact.
@@ -1929,33 +1997,16 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
         return {"ok": True}
 
     @app.get("/api/projects/{pid}/activity")
-    async def activity(pid: str, request: Request, after: int = 0):
+    def activity(pid: str, request: Request, after: int = 0):
         access(request, pid)
         with store.connect() as c:
-            rows = c.execute(
-                "SELECT * FROM events WHERE project_id=? AND id>? AND type NOT IN ('agent.delta','presence') ORDER BY id DESC LIMIT 150",
-                (pid, max(0, after)),
-            ).fetchall()
-            return {
-                "events": [
-                    {**dict(x), "payload": json.loads(x["payload"])}
-                    for x in reversed(rows)
-                ]
-            }
+            return {"events": store.read_events(c, pid, after, 150, activity=True)}
 
     @app.get("/api/projects/{pid}/event-batch")
-    async def event_batch(pid: str, request: Request, after: int = 0):
+    def event_batch(pid: str, request: Request, after: int = 0):
         access(request, pid)
         with store.connect() as c:
-            rows = c.execute(
-                "SELECT * FROM events WHERE project_id=? AND id>? ORDER BY id LIMIT 200",
-                (pid, max(0, after)),
-            ).fetchall()
-        return {
-            "events": [
-                {**dict(row), "payload": json.loads(row["payload"])} for row in rows
-            ]
-        }
+            return {"events": store.read_events(c, pid, after)}
 
     @app.get("/api/projects/{pid}/events")
     async def events(pid: str, request: Request, after: int = 0):
@@ -1974,16 +2025,15 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                 except HTTPException:
                     return
                 with store.connect() as c:
-                    rows = c.execute(
-                        "SELECT * FROM events WHERE project_id=? AND id>? ORDER BY id LIMIT 200",
-                        (pid, cursor),
-                    ).fetchall()
-                for r in rows:
-                    data = {**dict(r), "payload": json.loads(r["payload"])}
-                    cursor = r["id"]
+                    rows = store.read_events(c, pid, cursor)
+                for data in rows:
+                    cursor = data["id"]
                     yield f"id: {cursor}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
                 if time.monotonic() - tick > 15:
-                    yield ": keepalive\n\n"
+                    # EventSource hides comments from JavaScript. A separate named
+                    # heartbeat proves the stream is still delivering during idle
+                    # periods without changing the durable replay cursor.
+                    yield ": keepalive\n\nevent: heartbeat\ndata: {}\n\n"
                     tick = time.monotonic()
                 await asyncio.sleep(0.3 if rows else 0.8)
 
@@ -1996,19 +2046,25 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
     @app.get("/")
     @app.get("/index.html")
     async def index():
-        return FileResponse(web / "index.html", media_type="text/html")
+        # HTML always discovers the current bytes; asset URLs change automatically
+        # on edits/deploys, so immutable cached scripts cannot hide a new release.
+        html = (web / "index.html").read_text(encoding="utf-8")
+        return Response(asset_link.sub(version_asset_link, html), media_type="text/html", headers={"Cache-Control": "no-store"})
 
-    @app.get("/{asset}")
-    async def static(asset: str):
-        if asset not in {
-            "app.js",
-            "lucide-icons.js",
-            "styles.css",
-            "icon.svg",
-            "icon.png",
-            "favicon.ico",
-        }:
+    @app.api_route("/{asset}", methods=["GET", "HEAD"])
+    async def static(asset: str, request: Request, v: str = ""):
+        if asset not in PUBLIC_ASSETS:
             raise HTTPException(404, "Not found")
-        return FileResponse(web / asset)
+        try:
+            path, stat, digest = asset_fingerprint(asset)
+        except OSError:
+            raise HTTPException(404, "Not found") from None
+        cache = "public, max-age=31536000, immutable" if v == digest else "public, no-cache"
+        etag = '"' + digest + '"'
+        headers = {"Cache-Control": cache, "ETag": etag}
+        supplied = request.headers.get("if-none-match", "")
+        if any(tag.strip().removeprefix("W/") in (etag, "*") for tag in supplied.split(",")):
+            return Response(status_code=304, headers=headers)
+        return FileResponse(path, stat_result=stat, headers=headers)
 
     return app
