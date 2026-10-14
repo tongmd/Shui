@@ -105,7 +105,21 @@ async def test_fifo_and_durable_shared_native_session(queued_app):
 async def test_worker_receives_token_while_history_stays_redacted(queued_app):
     app, client, pid = queued_app
     secret = "secret-token-abcdefghijklmnop"
-    queue(client, pid, f"use token:{secret} for the private API")
+    content = f"use token:{secret} for the private API"
+    response = client.post(
+        f"/api/projects/{pid}/messages",
+        json={"content": content, "client_id": "token-message-01"},
+    )
+    assert response.status_code == 201
+    assert secret not in response.text
+    turn = response.json()["turn"]
+    assert client.post(f"/api/projects/{pid}/turns/{turn['id']}/cancel").status_code == 200
+    retried = client.post(
+        f"/api/projects/{pid}/turns/{turn['id']}/retry",
+        json={"client_id": "token-retry-01"},
+    )
+    assert retried.status_code == 201
+    assert secret not in retried.text
     seen = []
 
     async def runner(request, emit, cancel):
@@ -118,7 +132,8 @@ async def test_worker_receives_token_while_history_stays_redacted(queued_app):
     try:
         coordinator.kick(pid)
         await finish(coordinator)
-        assert f"token:{secret}" in seen[0]
+        assert len(seen) == 1
+        assert content in seen[0]
         history = client.get(f"/api/projects/{pid}/messages").json()
         assert secret not in json.dumps(history)
         assert "token:[redacted]" in json.dumps(history)

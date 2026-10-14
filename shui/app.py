@@ -1601,10 +1601,11 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             msg = c.execute(
                 "SELECT * FROM messages WHERE id=?", (t["user_message_id"],)
             ).fetchone()
+            content = store.message_content(c, msg)
         return enqueue(
             pid,
             u,
-            store.message_content(c, msg),
+            content,
             json.loads(msg["attachments"]),
             textfield(data, "client_id", 100),
             tid,

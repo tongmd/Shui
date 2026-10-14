@@ -667,8 +667,9 @@ async def test_token_prefix_is_redacted_from_output():
     out = agents._Output(
         emit, agents._Redactor({"SHUI_PROXY_URL": "http://127.0.0.1:7890"})
     )
-    await out.delta("please use token:secret-token-abcdefghijklmnop", final=True)
-    assert "token:[redacted]" in events[0][1]["delta"]
+    await out.append("answer", "please use token:secret-token-abcdefghijklmnop")
+    await out.finish()
+    assert "token:[redacted]" in out.text
     assert "secret-token-abcdefghijklmnop" not in json.dumps(events)
 
 
