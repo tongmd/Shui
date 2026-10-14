@@ -658,6 +658,20 @@ async def test_bearer_prefix_split_across_deltas_is_redacted(fake_cli, monkeypat
     assert "Bearer abcdefghijklmno" not in json.dumps(events)
 
 
+async def test_token_prefix_is_redacted_from_output():
+    events = []
+
+    async def emit(kind, payload):
+        events.append((kind, payload))
+
+    out = agents._Output(
+        emit, agents._Redactor({"SHUI_PROXY_URL": "http://127.0.0.1:7890"})
+    )
+    await out.delta("please use token:secret-token-abcdefghijklmnop", final=True)
+    assert "token:[redacted]" in events[0][1]["delta"]
+    assert "secret-token-abcdefghijklmnop" not in json.dumps(events)
+
+
 async def test_structured_tool_secret_is_redacted_before_json_encoding():
     events = []
 

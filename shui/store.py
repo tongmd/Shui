@@ -13,6 +13,9 @@ import sqlite3
 from pathlib import Path
 from urllib.parse import quote
 
+TOKEN_PATTERN = re.compile(r"(?i)\btoken:([^\s`'\"<>]{1,4096})")
+TOKEN_REDACTION = "token:[redacted]"
+
 
 def now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat(
@@ -75,6 +78,7 @@ class Store:
             CREATE UNIQUE INDEX IF NOT EXISTS project_native_session ON projects(provider,native_session_id) WHERE native_session_id IS NOT NULL;
             CREATE TABLE IF NOT EXISTS members(project_id TEXT NOT NULL REFERENCES projects(id),user_id TEXT NOT NULL REFERENCES users(id),role TEXT NOT NULL CHECK(role IN ('owner','editor','viewer')),PRIMARY KEY(project_id,user_id));
             CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),role TEXT NOT NULL,content TEXT NOT NULL DEFAULT '',author_id TEXT REFERENCES users(id),status TEXT NOT NULL,turn_id TEXT,attachments TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL,error TEXT,client_id TEXT);
+            CREATE TABLE IF NOT EXISTS message_secrets(message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,position INTEGER NOT NULL,value TEXT NOT NULL,PRIMARY KEY(message_id,position));
             CREATE UNIQUE INDEX IF NOT EXISTS request_idempotency ON messages(project_id,client_id) WHERE client_id IS NOT NULL;
             CREATE INDEX IF NOT EXISTS message_project_date ON messages(project_id,created_at);
             CREATE TABLE IF NOT EXISTS turns(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),user_message_id TEXT NOT NULL REFERENCES messages(id),assistant_message_id TEXT NOT NULL REFERENCES messages(id),author_id TEXT NOT NULL REFERENCES users(id),status TEXT NOT NULL,created_at TEXT NOT NULL,started_at TEXT,finished_at TEXT,error TEXT);
@@ -345,10 +349,12 @@ class Store:
     def enqueue_turn(self, c, project_id, user, content, attachments, client_id, retry_of=None, emit=True):
         """Insert a turn in the caller's transaction; bind child turns to their exact task/brief."""
         tid, mid, aid, at = uid(), uid(), uid(), now()
+        visible_content, secrets = self.redact_message_tokens(content)
         c.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?)", (
-            mid, project_id, "user", content, user["id"], "queued", tid,
+            mid, project_id, "user", visible_content, user["id"], "queued", tid,
             json.dumps(attachments), at, None, client_id,
         ))
+        self.store_message_secrets(c, mid, secrets)
         c.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?)", (
             aid, project_id, "assistant", "", None, "queued", tid, "[]", now(), None, None,
         ))
@@ -377,6 +383,37 @@ class Store:
         if task:
             self.delegation_changed(c, project_id, task["id"])
         return {"message": message, "turn": turn}
+
+    @staticmethod
+    def redact_message_tokens(content):
+        secrets = []
+
+        def replace(match):
+            secrets.append(match.group(0))
+            return TOKEN_REDACTION
+
+        return TOKEN_PATTERN.sub(replace, content or ""), secrets
+
+    @staticmethod
+    def store_message_secrets(c, message_id, secrets):
+        for index, value in enumerate(secrets):
+            c.execute(
+                "INSERT INTO message_secrets VALUES(?,?,?)",
+                (message_id, index, value),
+            )
+
+    def message_content(self, c, row):
+        content = row["content"]
+        secrets = [
+            secret["value"]
+            for secret in c.execute(
+                "SELECT value FROM message_secrets WHERE message_id=? ORDER BY position",
+                (row["id"],),
+            )
+        ]
+        for secret in secrets:
+            content = content.replace(TOKEN_REDACTION, secret, 1)
+        return content
 
     def file(self, row):
         return {

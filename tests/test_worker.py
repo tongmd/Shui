@@ -102,6 +102,31 @@ async def test_fifo_and_durable_shared_native_session(queued_app):
 
 
 @pytest.mark.asyncio
+async def test_worker_receives_token_while_history_stays_redacted(queued_app):
+    app, client, pid = queued_app
+    secret = "secret-token-abcdefghijklmnop"
+    queue(client, pid, f"use token:{secret} for the private API")
+    seen = []
+
+    async def runner(request, emit, cancel):
+        seen.append(request.prompt)
+        await emit("session", {"session_id": "token-session"})
+        return RunResult("token-session", "Complete")
+
+    coordinator = Coordinator(app.state.store, runner)
+    await coordinator.start()
+    try:
+        coordinator.kick(pid)
+        await finish(coordinator)
+        assert f"token:{secret}" in seen[0]
+        history = client.get(f"/api/projects/{pid}/messages").json()
+        assert secret not in json.dumps(history)
+        assert "token:[redacted]" in json.dumps(history)
+    finally:
+        await coordinator.close()
+
+
+@pytest.mark.asyncio
 async def test_distinct_projects_execute_concurrently(queued_app):
     app, client, pid = queued_app
     second_pid = client.post("/api/projects", json={"name": "Second paper"}).json()[

@@ -91,3 +91,9 @@
 .delegation-request-brief{margin-top:10px;padding:9px 11px;border:1px solid #dce5df;border-radius:7px;background:#f7faf8;font-size:11px;color:var(--muted)}
 .delegation-request-brief>summary{cursor:pointer;line-height:1.7}
 .delegation-request-context{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink);font-size:12px;line-height:1.8;margin:10px 0 0}
+.child-session-list{display:grid;gap:3px;margin:-2px 0 8px 24px;padding-left:10px;border-left:1px solid #d8e2dc}
+.project-item.child-session-item{margin-bottom:2px;padding:9px 8px;border-radius:7px;background:transparent}
+.project-item.child-session-item:hover{background:#e9f0eb}
+.project-item.child-session-item.active{background:#e0eee6}
+.project-item.child-session-item .project-symbol{width:22px;height:26px}
+.project-item.child-session-item .project-symbol svg{width:16px;height:16px}

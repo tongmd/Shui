@@ -113,7 +113,7 @@ function sendHarness() {
   const requests = []; const notices = []; const parentTurns = []; const opened = []; const windows = []; const order = []; let fail = false; let blocked = false; let nextId = 0; let responseGate = null;
   const input = { value: '', style: {}, focus() {} }; const elements = { 'message-input': input, 'assignment-context': { value: '' } };
   const state = { user: { id: 'me', role: 'member' }, project: { id: 'parent', role: 'editor', provider: 'codex' }, selectedAssignees: [], assignableMembers: ['alice', 'bob', 'memberli'].map(username => ({ id: username, username, role: 'editor' })), knownMentionMembers: [], assignableLoaded: true, attachments: [], messages: new Map(), epoch: 1, pendingSend: null, sending: false, uploading: 0, projectLoading: false };
-  const context = vm.createContext({ state, $: id => elements[id], uuid: () => `request-${++nextId}`, canWrite: () => true, canAssign: () => true, projectAPI: (suffix, id) => `/projects/${id}${suffix}`, hideMentions() {}, renderAssignees() {}, updateComposer() {}, renderUploads() {}, renderMessage() {}, updateDelegation() {}, preserveScroll: fn => fn(), updateTurn: turn => parentTurns.push(turn), toast: (...values) => notices.push(values), reserveTaskWindow: () => { order.push('reserve'); if (blocked) return null; const popup = { closed: false }; windows.push(popup); return popup; }, navigateTaskWindow: (popup, parentId, childId) => { if (!popup || popup.closed) return false; opened.push({ parentId, childId }); popup.navigated = true; return true; }, closeTaskWindow: popup => { if (popup) popup.closed = true; if (state.pendingTaskWindow === popup) state.pendingTaskWindow = null; }, api: async (url, options) => {
+  const context = vm.createContext({ state, $: id => elements[id], uuid: () => `request-${++nextId}`, canWrite: () => true, canAssign: () => true, projectAPI: (suffix, id) => `/projects/${id}${suffix}`, hideMentions() {}, renderAssignees() {}, updateComposer() {}, renderUploads() {}, renderMessage() {}, updateDelegation() {}, renderProjects() {}, preserveScroll: fn => fn(), updateTurn: turn => parentTurns.push(turn), toast: (...values) => notices.push(values), reserveTaskWindow: () => { order.push('reserve'); if (blocked) return null; const popup = { closed: false }; windows.push(popup); return popup; }, navigateTaskWindow: (popup, parentId, childId) => { if (!popup || popup.closed) return false; opened.push({ parentId, childId }); popup.navigated = true; return true; }, closeTaskWindow: popup => { if (popup) popup.closed = true; if (state.pendingTaskWindow === popup) state.pendingTaskWindow = null; }, api: async (url, options) => {
     order.push('api'); requests.push({ url, ...options }); if (responseGate) await responseGate; if (fail) throw new Error('offline'); if (url.endsWith('/delegations')) { const assignments = options.body.assignee_ids.map((id, i) => ({ message: { id: `m${i + 1}` }, turn: { id: `turn-${id}` }, delegation: { id: `task-${id}`, parent_project_id: 'parent', child_project_id: `child-${id}`, session_assignee: { id, username: id } } })); return { ...assignments[0], assignments }; } return { message: { id: 'm1' }, turn: { id: 'parent-turn' } };
   } });
   vm.runInContext(block('  function mentionPositions(', '  function hideMentions(') + block('  function taskWindowName(', '  function memberForChild(') + block('  async function sendMessage(', '  async function cancelTurn('), context);
@@ -128,7 +128,7 @@ test('unknown @ text remains a normal message without a matching project member'
 test('multiple assignees receive separate child sessions without inserting their turns into parent state', async () => {
   const h = sendHarness(); h.input.value = 'Run the comparison'; h.state.selectedAssignees = [{ id: 'alice' }, { id: 'bob' }]; h.elements['assignment-context'].value = 'Use only these constraints'; h.state.attachments = [{ id: 'file1' }];
   await h.context.sendMessage();
-  assert.equal(h.requests.length, 1); assert.equal(h.requests[0].url, '/projects/parent/delegations'); assert.deepEqual(Array.from(h.requests[0].body.assignee_ids), ['alice', 'bob']); assert.equal(h.requests[0].body.context, 'Use only these constraints'); assert.deepEqual(Array.from(h.requests[0].body.attachment_ids), ['file1']); assert.equal(h.parentTurns.length, 0); assert.equal(h.opened.length, 2); assert.equal(h.state.messages.size, 2); assert.equal(h.input.value, ''); assert.equal(h.state.selectedAssignees.length, 0); assert.equal(h.state.project.id, 'parent'); assert.equal(h.state.pendingTaskWindow, null); assert.equal(h.windows[0].closed, false); assert.deepEqual(h.order, ['reserve', 'reserve', 'api']);
+  assert.equal(h.requests.length, 1); assert.equal(h.requests[0].url, '/projects/parent/delegations'); assert.deepEqual(Array.from(h.requests[0].body.assignee_ids), ['alice', 'bob']); assert.equal(h.requests[0].body.context, 'Use only these constraints'); assert.deepEqual(Array.from(h.requests[0].body.attachment_ids), ['file1']); assert.equal(h.parentTurns.length, 0); assert.equal(h.opened.length, 0); assert.equal(h.windows.length, 0); assert.equal(h.state.messages.size, 2); assert.equal(h.input.value, ''); assert.equal(h.state.selectedAssignees.length, 0); assert.equal(h.state.project.id, 'parent'); assert.equal(h.state.pendingTaskWindow == null, true); assert.deepEqual(h.order, ['api']); assert.match(h.notices[0][0], /左侧/);
 });
 
 test('uncertain network failure keeps task draft and retries with identical client id', async () => {
@@ -137,7 +137,7 @@ test('uncertain network failure keeps task draft and retries with identical clie
   assert.equal(h.input.value, 'Investigate'); assert.equal(h.state.selectedAssignees.length, 1); assert.equal(h.state.sending, false);
   await h.context.sendMessage(); assert.equal(h.requests[1].body.client_id, id);
   h.input.value = 'Changed scope'; await h.context.sendMessage(); assert.notEqual(h.requests[2].body.client_id, id);
-  h.fail(false); await h.context.sendMessage(); assert.equal(h.requests[3].body.client_id, h.requests[2].body.client_id); assert.equal(h.opened.length, 1);
+  h.fail(false); await h.context.sendMessage(); assert.equal(h.requests[3].body.client_id, h.requests[2].body.client_id); assert.equal(h.opened.length, 0); assert.equal(h.windows.length, 0);
 });
 
 test('task with no instructions or too many selected files is not submitted', async () => {
@@ -178,25 +178,26 @@ test('preopened popup severs opener synchronously before navigation and keeps pa
   h.state.pendingTaskWindow = popup; h.closePendingTaskWindow(); assert.equal(popup.closed, false); assert.equal(h.state.pendingTaskWindow, null);
 });
 
-test('browser-blocked popup never replaces parent and leaves actionable notice', () => {
-  const { h, notices } = windowHarness(null); assert.equal(h.openProjectWindow('parent', 'child'), false); assert.equal(h.location.href, 'https://shui.example/'); assert.match(notices[0][0], /弹窗/);
+test('opening a child session selects it in the current page', () => {
+  const selections = []; const { h } = windowHarness(null); h.selectProject = (id, parentId) => selections.push({ id, parentId });
+  assert.equal(h.openProjectWindow('parent', 'child'), true); assert.deepEqual(selections, [{ id: 'child', parentId: 'parent' }]); assert.equal(h.location.href, 'https://shui.example/');
 });
 
-test('failed task creation closes its placeholder and retains retry id and draft', async () => {
+test('failed task creation retains retry id and draft without opening a placeholder', async () => {
   const h = sendHarness(); h.input.value = 'Investigate'; h.state.selectedAssignees = [{ id: 'alice' }]; h.fail(true);
-  await h.context.sendMessage(); assert.equal(h.windows.length, 1); assert.equal(h.windows[0].closed, true); assert.equal(h.state.pendingTaskWindow, null); assert.equal(h.input.value, 'Investigate'); const client = h.requests[0].body.client_id;
-  h.fail(false); await h.context.sendMessage(); assert.equal(h.requests[1].body.client_id, client); assert.equal(h.windows[1].closed, false); assert.equal(h.opened.length, 1);
+  await h.context.sendMessage(); assert.equal(h.windows.length, 0); assert.equal(h.state.pendingTaskWindow == null, true); assert.equal(h.input.value, 'Investigate'); const client = h.requests[0].body.client_id;
+  h.fail(false); await h.context.sendMessage(); assert.equal(h.requests[1].body.client_id, client); assert.equal(h.windows.length, 0); assert.equal(h.opened.length, 0);
 });
 
-test('navigation while create API is pending closes placeholder without opening or switching another session', async () => {
+test('navigation while create API is pending does not open or switch another session', async () => {
   let release; const h = sendHarness(); h.gate(new Promise(resolve => { release = resolve; })); h.input.value = 'Investigate'; h.state.selectedAssignees = [{ id: 'alice' }];
-  const pending = h.context.sendMessage(); assert.equal(h.windows.length, 1); h.state.epoch++; h.state.project = { id: 'other' }; release(); await pending;
-  assert.equal(h.windows[0].closed, true); assert.equal(h.opened.length, 0); assert.equal(h.state.project.id, 'other'); assert.equal(h.state.messages.size, 0);
+  const pending = h.context.sendMessage(); assert.equal(h.windows.length, 0); h.state.epoch++; h.state.project = { id: 'other' }; release(); await pending;
+  assert.equal(h.opened.length, 0); assert.equal(h.state.project.id, 'other'); assert.equal(h.state.messages.size, 0);
 });
 
-test('blocked creation popup still creates task and keeps a parent task entry for reopening', async () => {
+test('assignment creates task and keeps a parent task entry for opening from the sidebar', async () => {
   const h = sendHarness(); h.blocked(true); h.input.value = 'Investigate'; h.state.selectedAssignees = [{ id: 'alice' }]; await h.context.sendMessage();
-  assert.equal(h.requests.length, 1); assert.equal(h.state.messages.has('m1'), true); assert.equal(h.state.project.id, 'parent'); assert.equal(h.opened.length, 0); assert.match(h.notices[0][0], /任务卡/);
+  assert.equal(h.requests.length, 1); assert.equal(h.state.messages.has('m1'), true); assert.equal(h.state.project.id, 'parent'); assert.equal(h.opened.length, 0); assert.match(h.notices[0][0], /左侧/);
 });
 
 test('finishing a task preserves its child window while submitting summary to parent', async () => {
@@ -301,7 +302,7 @@ test('new requester can manage the shared member task while other project editor
 });
 
 test('old completed task event cannot replace reopened task or its separate final summary', () => {
-  const h = harness({ preserveScroll: fn => fn(), renderMessage() {}, renderDelegations() {}, renderChildSession() {}, updateComposer() {} });
+  const h = harness({ preserveScroll: fn => fn(), renderMessage() {}, renderProjects() {}, renderDelegations() {}, renderChildSession() {}, updateComposer() {} });
   const old = { id: 'old', child_project_id: 'child', status: 'completed', summary: 'OLD_RESULT', created_at: '2026-10-14T01:00:00Z' }; const current = { id: 'new', child_project_id: 'child', status: 'open', created_at: '2026-10-14T02:00:00Z' };
   const summaryMessage = { id: 'summary', role: 'user', merge_delegation: { ...old } }; h.state.messages = new Map([['summary', summaryMessage]]); h.state.project = { id: 'child', parent_project_id: 'parent', delegation: current };
   vm.runInContext(block('  function updateDelegation(', '  function taskWindowName('), h);

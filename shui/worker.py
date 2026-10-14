@@ -478,6 +478,7 @@ class Coordinator:
                         ).fetchone()
                         if item:
                             attached.append(item["relative_path"])
+                    content = self.store.message_content(c, row)
                     prompt = (
                         f"[Shui! shared paper project: {p['name']} | collaborator: {author['display_name']} (@{author['username']})]\n"
                         "Continue the existing project session. Other collaborators share this same history. "
@@ -490,7 +491,7 @@ class Coordinator:
                         "Figures use key, title, path relative to the workspace, caption, experiment (experiment name/key), claim, and validation. "
                         "Claims use key, statement, status, and evidence. Results use key, experiment, metric, value as a string, unit, model, summary, and status. "
                         "Only list figure paths for existing PNG, JPEG, WebP, GIF, SVG, or PDF files. Do not put credentials or private paths in this file.\n\n"
-                        + row["content"]
+                        + content
                     )
                     if p["github_url"] or p["overleaf_url"]:
                         prompt += "\n\nProject resources:\n" + "\n".join(
@@ -503,7 +504,7 @@ class Coordinator:
                         )
                     if delegation:
                         brief = self.store.delegation_request_for_turn(c, t["id"])
-                        prompt = self._delegation_prompt(c, delegation, author, row["content"], brief)
+                        prompt = self._delegation_prompt(c, delegation, author, content, brief)
                     if attached:
                         prompt += (
                             "\n\nAttached files in this project workspace:\n"
