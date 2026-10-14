@@ -13,15 +13,20 @@ continues the project's existing native agent conversation. Projects run in
 parallel; turns within a project run in order.
 
 To delegate, type **@** in the main conversation, choose project members, and
-send the assignment. Shui opens one independent collaboration session for the
-task, where the assigned people and a dedicated agent can discuss and work.
+send the assignment. Shui opens the independent collaboration session in a
+separate browser window, keeping the main conversation in its original window.
+The assigned people and a dedicated agent can discuss and work there.
 Every current project member can view that session from its task card or the
 **Tasks** panel. The main agent keeps its own conversation; child dialogue is
 not appended to its context. Add optional focused background when assigning.
 
 When the work is ready, choose **完成并汇总** in the child session, review the
 result summary, and submit it. The summary and artifact references enter the
-main agent's queue for integration. The child transcript remains available.
+main agent's queue for integration. The original main window receives the
+result live, and the child window keeps the completed transcript open.
+Each window has its own shareable session URL and restores the same session
+on refresh. If the browser blocks a new window, use **在新窗口打开** on the
+task card to open it explicitly.
 Each task uses its own workspace and native session; later child messages
 resume that same session. Child agents are instructed to treat parent files
 as read-only references and place proposed changes in their own workspace.

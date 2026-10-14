@@ -83,3 +83,5 @@
 .child-session-context>summary{cursor:pointer;padding:3px 0}
 #child-session-context-body{max-height:160px;overflow:auto;padding:6px 0}
 #child-session-context-body>p{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8;margin:0}
+
+.delegation-current{display:block;font-size:10px;color:var(--muted);margin-top:10px}

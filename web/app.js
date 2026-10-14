@@ -19,7 +19,7 @@
   function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined && text !== null) e.textContent = String(text); return e; }
   function button(label, cls, action, glyph) { const b = el('button', cls, label); b.type = 'button'; if (glyph) b.prepend(icon(glyph)); if (action) b.addEventListener('click', action); return b; }
   function iconButton(label, glyph, action) { const b = button('', 'icon-btn', action, glyph); b.title = label; b.setAttribute('aria-label', label); return b; }
-  const state = { user: null, csrf: null, providers: [], projects: [], project: null, messages: new Map(), turns: new Map(), tools: new Map(), files: [], members: [], presence: [], activity: [], insights: null, cursor: 0, source: null, reconnectTimer: null, reconnectDelay: 1200, heartbeat: null, metaTimer: null, insightTimer: null, epoch: 0, tab: 'files', workspacePath: '', attachments: [], uploading: 0, sending: false, pendingSend: null, historyMore: true, loadingHistory: false, dialogAction: null, projectLoading: false, liveConnected: false, delegations: new Map(), assignableMembers: [], selectedAssignees: [], mention: null, mentionIndex: 0, mentionMatches: [], delegationError: '', delegationLoading: false, delegationBusy: false };
+  const state = { user: null, csrf: null, providers: [], projects: [], project: null, messages: new Map(), turns: new Map(), tools: new Map(), files: [], members: [], presence: [], activity: [], insights: null, cursor: 0, source: null, reconnectTimer: null, reconnectDelay: 1200, heartbeat: null, metaTimer: null, insightTimer: null, epoch: 0, tab: 'files', workspacePath: '', attachments: [], uploading: 0, sending: false, pendingSend: null, pendingTaskWindow: null, historyMore: true, loadingHistory: false, dialogAction: null, projectLoading: false, liveConnected: false, delegations: new Map(), assignableMembers: [], selectedAssignees: [], mention: null, mentionIndex: 0, mentionMatches: [], delegationError: '', delegationLoading: false, delegationBusy: false };
   const labels = { idle: '准备就绪', running: '正在推进', queued: '排队中', waiting: '等待处理', complete: '已完成', failed: '任务失败', error: '需要关注', cancelled: '已取消', interrupted: '已中断' };
   const providerNames = { codex: 'Codex', claude: 'Claude', bridge: 'Bridge' };
   const roles = { owner: '管理员', editor: '协作者', viewer: '只读成员', member: '团队成员' };
@@ -92,6 +92,7 @@
   function setConnection(mode, text) { state.liveConnected = mode === 'connected'; $('connection').className = `connection ${mode}`; $('connection-text').textContent = text; }
   function stopEvents() { if (state.source) state.source.close(); state.source = null; clearTimeout(state.pollTimer); state.pollTimer = null; clearTimeout(state.reconnectTimer); state.reconnectTimer = null; clearTimeout(state.metaTimer); state.metaTimer = null; clearTimeout(state.insightTimer); state.insightTimer = null; clearInterval(state.heartbeat); state.heartbeat = null; }
   function clearProjectView() {
+    closePendingTaskWindow();
     stopEvents(); state.epoch++; state.project = null; state.projectLoading = false; state.messages.clear(); state.turns.clear(); state.tools.clear(); state.files = []; state.members = []; state.presence = []; state.activity = []; state.insights = null; state.attachments = []; state.uploading = 0; state.sending = false; state.pendingSend = null; state.workspacePath = ''; state.cursor = 0; state.historyMore = true; state.loadingHistory = false;
     resetDelegations();
     ['messages', 'shared-files', 'workspace-files', 'workspace-path', 'member-list', 'activity-list', 'presence', 'project-links', 'insights-summary', 'experiment-list', 'figure-list'].forEach(id => $(id).replaceChildren());
@@ -120,27 +121,47 @@
   async function loadProjects(preferId) {
     if (!state.user || state.user.must_change_password) return;
     $('project-list').replaceChildren(el('div', 'skeleton'), el('div', 'skeleton'));
-    try { const data = await api('/projects'); state.projects = (data.projects || []).filter(p => !p.parent_project_id); renderProjects(); const id = preferId || stored('shui-project'); const next = state.projects.find(p => String(p.id) === String(id)) || state.projects[0]; const child = !preferId && restoredChildSession(next?.id); if (next) await selectProject(child || next.id, child ? next.id : null); else showWelcome(); }
+    try { const data = await api('/projects'); state.projects = (data.projects || []).filter(p => !p.parent_project_id); renderProjects(); const view = preferredSessionView(); const id = preferId || view?.parent_id || stored('shui-project'); const next = state.projects.find(p => String(p.id) === String(id)) || state.projects[0]; const child = !preferId && String(next?.id) === String(view?.parent_id) ? view?.child_id : null; if (next) await selectProject(child || next.id, child ? next.id : null); else showWelcome(); }
     catch (err) { $('project-list').replaceChildren(el('p', 'empty-small', err.message), button('重新加载', 'quiet-btn', () => loadProjects(), 'refresh')); setConnection('', '加载失败'); }
   }
   function renderProjects() {
     const query = $('project-search').value.trim().toLowerCase(); const list = state.projects.filter(p => `${p.name} ${p.description || ''}`.toLowerCase().includes(query)); $('project-list').replaceChildren();
     if (!list.length) { $('project-list').append(el('p', 'empty-small', query ? '没有找到这个项目。' : '还没有项目，下一篇研究从这里开始。')); return; }
-    list.forEach(p => { const active = String(parentProjectId()) === String(p.id); const b = button('', `project-item${active ? ' active' : ''}`, () => selectProject(p.id)); b.setAttribute('aria-current', active ? 'page' : 'false'); const s = el('span', 'project-symbol'); s.append(icon('paper')); const t = el('span', 'project-item-text'); t.append(el('strong', '', p.name), el('small', '', `${providerNames[p.provider] || p.provider} · ${labels[p.status] || '准备就绪'}`)); b.append(s, t); if (p.status === 'running') b.append(el('span', 'project-running-dot')); $('project-list').append(b); });
+    list.forEach(p => { const active = String(parentProjectId()) === String(p.id); const b = button('', `project-item${active ? ' active' : ''}`, () => state.project?.parent_project_id ? openProjectWindow(p.id) : selectProject(p.id)); b.setAttribute('aria-current', active ? 'page' : 'false'); const s = el('span', 'project-symbol'); s.append(icon('paper')); const t = el('span', 'project-item-text'); t.append(el('strong', '', p.name), el('small', '', `${providerNames[p.provider] || p.provider} · ${labels[p.status] || '准备就绪'}`)); b.append(s, t); if (p.status === 'running') b.append(el('span', 'project-running-dot')); $('project-list').append(b); });
   }
-  function restoredChildSession(parentId) {
-    try { const value = JSON.parse(stored('shui-child-session')); return value && String(value.parent_id) === String(parentId) && typeof value.child_id === 'string' ? value.child_id : null; } catch (_) { return null; }
+  function validSessionView(value) {
+    const validId = id => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(id);
+    return value && validId(value.parent_id) && (!value.child_id || validId(value.child_id)) ? { parent_id: value.parent_id, child_id: value.child_id || null } : null;
   }
-  function showWelcome() { clearProjectView(); stored('shui-project', null); stored('shui-child-session', null); $('welcome').hidden = false; $('project-view').hidden = true; $('breadcrumb-project').textContent = '概览'; $('inspector-empty').hidden = false; ['files', 'insights', 'activity', 'tasks', 'members'].forEach(t => $(`panel-${t}`).hidden = true); $('project-error').hidden = true; $('conversation-empty').hidden = true; renderProjects(); setConnection('connected', '已登录'); }
+  function projectViewURL(parentId, childId = null) {
+    const url = new URL(location.href); url.searchParams.set('project', parentId); if (childId) url.searchParams.set('session', childId); else url.searchParams.delete('session'); url.hash = ''; return url.href;
+  }
+  function preferredSessionView() {
+    const url = new URL(location.href);
+    // Each window owns its URL. A child window must never change where its parent reloads.
+    if (url.searchParams.has('project')) return validSessionView({ parent_id: url.searchParams.get('project'), child_id: url.searchParams.get('session') });
+    try { return validSessionView(JSON.parse(sessionStorage.getItem('shui-session-view'))); } catch (_) { return null; }
+  }
+  function rememberSessionView(project) {
+    const view = { parent_id: project.parent_project_id || project.id, child_id: project.parent_project_id ? project.id : null };
+    try { history.replaceState(null, '', projectViewURL(view.parent_id, view.child_id)); } catch (_) {}
+    try { sessionStorage.setItem('shui-session-view', JSON.stringify(view)); } catch (_) {}
+    if (!view.child_id) stored('shui-project', view.parent_id);
+  }
+  function clearSessionView() {
+    try { sessionStorage.removeItem('shui-session-view'); const url = new URL(location.href); url.searchParams.delete('project'); url.searchParams.delete('session'); history.replaceState(null, '', url.href); } catch (_) {}
+  }
+  function showWelcome() { clearProjectView(); clearSessionView(); $('welcome').hidden = false; $('project-view').hidden = true; $('breadcrumb-project').textContent = '概览'; $('inspector-empty').hidden = false; ['files', 'insights', 'activity', 'tasks', 'members'].forEach(t => $(`panel-${t}`).hidden = true); $('project-error').hidden = true; $('conversation-empty').hidden = true; renderProjects(); setConnection('connected', '已登录'); }
   async function projectUnavailable(id, message = '项目已删除，或你已没有访问权限。') {
     if (String(state.project?.id) !== String(id)) return;
     const parentId = state.project?.parent_project_id;
-    if (parentId) { stored('shui-child-session', null); state.project = null; if (message) toast(message); await selectProject(parentId); return; }
+    if (parentId) { state.project = null; if (message) toast(message); await selectProject(parentId); return; }
     state.projects = state.projects.filter(project => String(project.id) !== String(id)); showWelcome(); if (message) toast(message); await loadProjects();
   }
   async function selectProject(id, parentId = null) {
     if (!state.user || state.user.must_change_password) return;
     if (String(state.project?.id) === String(id) && !state.projectLoading) { closeDrawers(); return; }
+    closePendingTaskWindow();
     const epoch = ++state.epoch; stopEvents(); closeDrawers(); state.projectLoading = true; state.messages.clear(); state.turns.clear(); state.tools.clear(); state.presence = []; state.activity = []; state.insights = null; state.attachments = []; state.uploading = 0; state.pendingSend = null; state.sending = false; state.workspacePath = ''; state.cursor = 0; state.historyMore = true;
     resetDelegations();
     state.project = state.projects.find(p => String(p.id) === String(id)) || { id, name: '正在加载…', parent_project_id: parentId }; $('message-input').value = ''; $('message-input').style.height = ''; renderUploads(); renderProjects(); renderHeader();
@@ -153,7 +174,7 @@
         if (m.role === 'user' && m.turn_id) state.turns.set(String(m.turn_id), { id: m.turn_id, author_id: m.author?.id, status: m.status });
       });
       if (d.project.active_turn) state.turns.set(String(d.project.active_turn.id), d.project.active_turn);
-      state.projectLoading = false; state.historyMore = (d.messages || []).length >= 100; stored('shui-project', parentProjectId()); stored('shui-child-session', d.project.parent_project_id ? JSON.stringify({ parent_id: d.project.parent_project_id, child_id: d.project.id }) : null); updateProjectInList(d.project); renderHeader(); renderMessages(); renderFiles(); renderMembers(); renderInsights(); renderTab(); updateComposer(); scrollBottom();
+      state.projectLoading = false; state.historyMore = (d.messages || []).length >= 100; rememberSessionView(d.project); updateProjectInList(d.project); renderHeader(); renderMessages(); renderFiles(); renderMembers(); renderInsights(); renderTab(); updateComposer(); scrollBottom();
       connectEvents(epoch); state.lastStreamEvent = 0; state.lastMetaPoll = 0; pollEvents(epoch); heartbeat(epoch); state.heartbeat = setInterval(() => heartbeat(epoch), 25000); loadWorkspace(''); loadActivity(); loadInsights(); loadDelegations();
     } catch (err) { if (epoch !== state.epoch) return; if (err.status === 404 || err.status === 403) { await projectUnavailable(id); return; } state.projectLoading = false; $('messages').replaceChildren(); $('project-error').replaceChildren(el('span', '', err.message), button('重试', 'quiet-btn', () => { state.project = null; selectProject(id); }, 'refresh')); $('project-error').hidden = false; setConnection('', '未连接'); updateComposer(); }
   }
@@ -176,7 +197,7 @@
     }, 250);
   }
   function renderHeader() {
-    const p = state.project; if (!p) return; $('project-title').textContent = p.name; $('breadcrumb-project').replaceChildren(); if (p.parent_project_id) { $('breadcrumb-project').append(button(p.parent_project_name || p.delegation?.parent_project_name || '主会话', 'breadcrumb-parent', () => selectProject(p.parent_project_id)), document.createTextNode(` / ${p.name}`)); } else $('breadcrumb-project').textContent = p.name; const description = p.parent_project_id ? `${p.parent_project_name || '主项目'} · 独立协作会话` : p.description; $('project-description').textContent = description || ''; $('project-description').hidden = !description;
+    const p = state.project; if (!p) return; $('project-title').textContent = p.name; $('breadcrumb-project').replaceChildren(); if (p.parent_project_id) { $('breadcrumb-project').append(projectWindowLink(p.parent_project_name || p.delegation?.parent_project_name || '主会话', 'breadcrumb-parent', p.parent_project_id), document.createTextNode(` / ${p.name}`)); } else $('breadcrumb-project').textContent = p.name; const description = p.parent_project_id ? `${p.parent_project_name || '主项目'} · 独立协作窗口` : p.description; $('project-description').textContent = description || ''; $('project-description').hidden = !description;
     $('provider-pill').replaceChildren(icon('spark'), document.createTextNode(providerNames[p.provider] || p.provider || '')); $('project-status').textContent = labels[p.status] || '正在加载'; $('project-model').textContent = p.model || ''; $('project-settings').hidden = !isOwner() || !!p.parent_project_id; $('add-member').hidden = !isOwner() || !!p.parent_project_id;
     const links = $('project-links'); links.replaceChildren();
     [['github_url', 'GitHub'], ['overleaf_url', 'Overleaf']].forEach(([key, label]) => { if (!p[key]) return; let url; try { url = new URL(p[key]); } catch (_) { return; } if (url.protocol !== 'https:' || url.username || url.password) return; const a = el('a', 'project-link', `${label} ↗`); a.href = url.href; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.setAttribute('aria-label', `打开 ${label} 项目（新窗口）`); links.append(a); });
@@ -277,9 +298,9 @@
     const card = el('article', `delegation-card${compact ? ' compact' : ''}`); card.dataset.delegationId = task.id;
     const head = el('div', 'delegation-card-heading'); head.append(el('strong', '', task.title || '协作任务'), el('span', `delegation-status ${task.status}`, delegationStatus(task))); card.append(head);
     card.append(el('p', 'delegation-assignees', `${(task.assignees || []).map(user => `@${user.username || name(user)}`).join('、')} · 专用助手`));
-    if (!compact) card.append(el('p', 'delegation-card-note', task.status === 'completed' ? '最终摘要已交给主会话，完整讨论保留在子会话。' : task.status === 'cancelled' ? '任务已取消，讨论记录仍可查看。' : '独立会话 · 项目成员可查看'));
+    if (!compact) card.append(el('p', 'delegation-card-note', task.status === 'completed' ? '最终摘要已交给主会话，完整讨论保留在协作窗口。' : task.status === 'cancelled' ? '任务已取消，讨论记录仍可查看。' : '独立窗口 · 项目成员可查看'));
     if (task.status === 'completed' && task.merge_turn?.status) card.append(el('p', 'delegation-merge-state', `主会话整合：${labels[task.merge_turn.status] || task.merge_turn.status}`));
-    const current = String(state.project?.id) === String(task.child_project_id); const open = button(current ? '正在查看' : '打开协作会话', 'quiet-btn delegation-open', () => openDelegation(task), 'arrow'); open.disabled = current; card.append(open); return card;
+    const current = String(state.project?.id) === String(task.child_project_id); if (current) card.append(el('span', 'delegation-current', '正在此窗口查看')); else card.append(projectWindowLink('在新窗口打开', 'quiet-btn delegation-open', task.parent_project_id, task.child_project_id)); return card;
   }
   function renderDelegations() {
     const list = $('delegation-list'); list.replaceChildren(); const tasks = [...state.delegations.values()].sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
@@ -304,7 +325,33 @@
     if (state.project?.parent_project_id && String(task.child_project_id) === String(state.project.id)) state.project.delegation = { ...state.project.delegation, ...task };
     preserveScroll(() => { state.messages.forEach(message => { if (message.role === 'user' && ((task.merge_turn_id && String(message.turn_id) === String(task.merge_turn_id)) || String(message.merge_delegation?.id) === String(task.id))) { message.merge_delegation = { ...message.merge_delegation, ...task }; renderMessage(message); } else if (String(message.delegation?.id) === String(task.id)) renderMessage(message); }); }); renderDelegations(); renderChildSession(); updateComposer();
   }
-  function openDelegation(task) { return selectProject(task.child_project_id, task.parent_project_id); }
+  function closeTaskWindow(popup) { try { if (popup && !popup.closed) popup.close(); } catch (_) {} if (state.pendingTaskWindow === popup) state.pendingTaskWindow = null; }
+  function closePendingTaskWindow() { closeTaskWindow(state.pendingTaskWindow); }
+  function reserveTaskWindow(message = '正在打开协作会话…') {
+    let popup;
+    try {
+      // Preopen during the user gesture. Passing the noopener feature here returns
+      // null even on success, so sever opener before navigating the blank window.
+      popup = window.open('about:blank', '_blank', 'popup,width=1080,height=840');
+      if (!popup) return null; popup.opener = null;
+      if (popup.opener !== null) { closeTaskWindow(popup); return null; }
+      popup.document.title = 'Shui! · 协作会话'; popup.document.body.textContent = message;
+      return popup;
+    } catch (_) { closeTaskWindow(popup); return null; }
+  }
+  function navigateTaskWindow(popup, parentId, childId = null) {
+    try { if (!popup || popup.closed) return false; popup.location.replace(projectViewURL(parentId, childId)); } catch (_) { return false; }
+    try { popup.focus(); } catch (_) {} return true;
+  }
+  function openProjectWindow(parentId, childId = null) {
+    const popup = reserveTaskWindow(); const opened = navigateTaskWindow(popup, parentId, childId);
+    if (!opened) { closeTaskWindow(popup); toast('浏览器未打开新窗口。请允许此站点弹窗，或右键会话链接选择在新窗口打开。', 'error'); } return opened;
+  }
+  function projectWindowLink(label, cls, parentId, childId = null) {
+    const link = el('a', cls, label); link.href = projectViewURL(parentId, childId); link.target = '_blank'; link.rel = 'noopener noreferrer'; link.setAttribute('aria-label', `${label}（新窗口）`);
+    link.addEventListener('click', event => { if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return; event.preventDefault(); openProjectWindow(parentId, childId); }); return link;
+  }
+  function openDelegation(task) { return openProjectWindow(task.parent_project_id, task.child_project_id); }
   function lastCompleteAssistant(messages) { return [...messages].reverse().find(message => message.role === 'assistant' && message.status === 'complete' && String(message.content || '').trim()); }
   function mergeReadiness(task, project, messages) {
     if (!task || task.status !== 'open') return '任务已结束，讨论记录保留。';
@@ -314,7 +361,8 @@
   }
   function renderChildSession() {
     const project = state.project; const task = project?.delegation; $('child-session-bar').hidden = !project?.parent_project_id; if (!project?.parent_project_id) return;
-    $('child-session-info').textContent = task ? `${(task.assignees || []).map(user => `@${user.username || name(user)}`).join('、')} 与专用助手在这里讨论；项目所有成员都能查看。` : '正在打开独立协作会话…';
+    $('return-parent').href = projectViewURL(project.parent_project_id);
+    $('child-session-info').textContent = task ? `${(task.assignees || []).map(user => `@${user.username || name(user)}`).join('、')} 与专用助手在此窗口讨论；主会话留在原窗口，项目成员都能查看。` : '正在打开独立协作窗口…';
     const context = $('child-session-context-body'); const contextKey = JSON.stringify([task?.context, task?.attachment_ids]); $('child-session-context').hidden = !task?.context && !task?.attachments?.length;
     if (context.dataset.content !== contextKey) { context.dataset.content = contextKey; context.replaceChildren(); if (task?.context) context.append(el('p', '', task.context)); if (task?.attachments?.length) { const files = el('div', 'message-attachments'); task.attachments.forEach(file => files.append(button(file.name, 'attachment-chip', () => openFile(file), 'paper'))); context.append(files); } }
     $('child-session-status').textContent = task ? delegationStatus(task) : '正在加载'; $('child-session-status').className = `delegation-status ${task?.status || ''}`;
@@ -329,7 +377,7 @@
     openDialog('完成任务并汇总', '协作任务', body => { body.append(el('p', 'form-help', '确认最终结论和成果链接。主会话只接收这份摘要，完整讨论留在此会话。')); field(body, '最终摘要', 'delegation-summary', { tag: 'textarea', required: true, maxLength: 12000, value: String(last.content).slice(0, 12000) }); }, async () => {
       const summary = $('delegation-summary').value.trim(); if (!summary) throw new Error('请填写最终摘要。');
       const data = await api(projectAPI(`/delegations/${encodeURIComponent(task.id)}/merge`, task.parent_project_id), { method: 'POST', body: { summary, client_id } });
-      if (epoch !== state.epoch) return; updateDelegation(data.delegation); toast('最终摘要已提交主会话，等待助手整合。'); await selectProject(task.parent_project_id);
+      if (epoch !== state.epoch) return; updateDelegation(data.delegation); toast('最终摘要已提交主会话。此窗口保留完整讨论记录。'); refreshProjectMetaSoon();
     }, '提交摘要');
   }
   function cancelDelegation() {
@@ -344,7 +392,7 @@
     $('message-input').disabled = !available || (assigning && state.sending); $('attach-button').disabled = !available || state.sending || state.uploading > 0; $('assignment-context').disabled = !available || state.sending;
     $('send-message').disabled = !available || state.sending || state.uploading > 0 || (!$('message-input').value.trim() && (assigning || !state.attachments.length)); $('send-message-label').textContent = assigning ? '分派任务' : '发送';
     $('message-input').placeholder = !canWrite() && state.project ? '此会话只读' : assigning ? '描述任务目标、交付成果和约束…' : canAssign() ? '发送消息，@ 成员分派任务，或粘贴图片…' : '发送消息，或粘贴图片…';
-    $('composer-note').textContent = !available && state.project && !state.projectLoading ? '只读权限' : state.sending ? '正在发送…' : assigning ? `已选择 ${state.selectedAssignees.length} 位成员 · 共用一个独立会话` : canAssign() ? '输入 @ 并选择成员后分派任务 · Ctrl/Cmd+Enter 发送' : '';
+    $('composer-note').textContent = !available && state.project && !state.projectLoading ? '只读权限' : state.sending ? '正在发送…' : assigning ? `已选择 ${state.selectedAssignees.length} 位成员 · 在新窗口协作` : canAssign() ? '输入 @ 并选择成员后分派任务 · Ctrl/Cmd+Enter 发送' : '';
   }
   function nearBottom() { const c = $('conversation'); return c.scrollHeight - c.scrollTop - c.clientHeight < 110; }
   function scrollBottom() { requestAnimationFrame(() => { const c = $('conversation'); c.scrollTop = c.scrollHeight; $('jump-latest').hidden = true; }); }
@@ -392,7 +440,7 @@
     if (m.status && m.status !== 'complete') meta.append(el('span', `message-status ${m.status}`, labels[m.status] || m.status)); body.append(meta);
     const content = visibleMessageContent(m);
     body.append(markdown(content || (m.role === 'assistant' && m.status === 'queued' ? '等待前面的任务完成…' : '')));
-    if (m.merge_delegation) body.append(button('查看完整协作会话', 'quiet-btn delegation-open', () => openDelegation(m.merge_delegation), 'arrow'));
+    if (m.merge_delegation) body.append(projectWindowLink('新窗口查看完整协作会话', 'quiet-btn delegation-open', m.merge_delegation.parent_project_id, m.merge_delegation.child_project_id));
     if (m.delegation) body.append(delegationCard(state.delegations.get(String(m.delegation.id)) || m.delegation));
     if (m.attachments?.length) { const files = el('div', 'message-attachments'); m.attachments.forEach(f => { const b = button('', 'attachment-chip', () => openFile(f)); b.append(icon('paper'), el('span', '', f.name), el('small', '', bytes(f.size))); files.append(b); }); body.append(files); }
     if (m.error) body.append(el('div', 'message-error', m.error));
@@ -413,15 +461,16 @@
     if (assigning && content.length > 12000) { toast('任务说明最多 12000 字，请精简后再分派。', 'error'); return; }
     if (assigning && attachment_ids.length > 12) { toast('每项协作任务最多附带 12 个文件，请先移除多余附件。', 'error'); return; }
     const context = assigning ? $('assignment-context').value.trim() : ''; const pid = state.project.id; const epoch = state.epoch; const signature = JSON.stringify({ pid, content, attachment_ids, assignee_ids, context }); if (!state.pendingSend || state.pendingSend.signature !== signature) state.pendingSend = { signature, client_id: uuid() };
+    const taskWindow = assigning ? reserveTaskWindow('正在创建协作会话，请稍候…') : null; let windowNavigated = false; if (assigning) state.pendingTaskWindow = taskWindow;
     const client_id = state.pendingSend.client_id; state.sending = true; hideMentions(); renderAssignees(); updateComposer();
     try {
       const d = await api(projectAPI(assigning ? '/delegations' : '/messages', pid), { method: 'POST', body: { content, attachment_ids, client_id, ...(assigning ? { assignee_ids, context } : {}) } }); if (epoch !== state.epoch) return;
       state.pendingSend = null; state.messages.set(String(d.message.id), d.message); if (d.turn && !assigning) updateTurn(d.turn); if (d.delegation) updateDelegation(d.delegation); preserveScroll(() => renderMessage(d.message), true);
       if ($('message-input').value.trim() === content) { $('message-input').value = ''; $('message-input').style.height = ''; } state.attachments = []; state.selectedAssignees = []; $('assignment-context').value = ''; renderAssignees(); renderUploads();
-      if (assigning && d.delegation) { toast('已建立协作会话，项目成员都能查看。'); await openDelegation(d.delegation); } else $('message-input').focus();
+      if (assigning && d.delegation) { windowNavigated = navigateTaskWindow(taskWindow, d.delegation.parent_project_id, d.delegation.child_project_id); if (state.pendingTaskWindow === taskWindow) state.pendingTaskWindow = null; toast(windowNavigated ? '协作会话已在新窗口打开，主会话保留在这里。' : '任务已建立。浏览器未打开弹窗，请点击任务卡「在新窗口打开」。', windowNavigated ? '' : 'error'); } else $('message-input').focus();
     }
     catch (err) { toast(`${err.message} 消息已保留，再次发送会安全重试。`, 'error'); }
-    finally { if (epoch === state.epoch) { state.sending = false; renderAssignees(); updateComposer(); } }
+    finally { if (!windowNavigated) closeTaskWindow(taskWindow); if (epoch === state.epoch) { state.sending = false; renderAssignees(); updateComposer(); } }
   }
   async function cancelTurn(id) { try { await api(projectAPI(`/turns/${encodeURIComponent(id)}/cancel`), { method: 'POST', body: {} }); toast('已发出停止请求。'); } catch (err) { toast(err.message, 'error'); } }
   async function retryTurn(id) { const pid = state.project?.id; const epoch = state.epoch; try { const d = await api(projectAPI(`/turns/${encodeURIComponent(id)}/retry`, pid), { method: 'POST', body: { client_id: uuid() } }); if (epoch !== state.epoch) return; if (d.turn) updateTurn(d.turn); if (d.message) { state.messages.set(String(d.message.id), d.message); preserveScroll(() => renderMessage(d.message), true); } toast('已重新加入任务队列。'); } catch (err) { toast(err.message, 'error'); } }
@@ -846,7 +895,7 @@
   $('message-input').addEventListener('keydown', event => { if (handleMentionKey(event)) return; if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) { event.preventDefault(); sendMessage(); } });
   $('message-input').addEventListener('click', updateMentions); $('message-input').addEventListener('keyup', event => { if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) updateMentions(); });
   $('message-input').addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== $('message-input') && !$('mention-list').contains(document.activeElement)) hideMentions(); }, 120));
-  $('return-parent').addEventListener('click', () => { if (state.project?.parent_project_id) selectProject(state.project.parent_project_id); });
+  $('return-parent').addEventListener('click', event => { if (event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return; event.preventDefault(); if (state.project?.parent_project_id) openProjectWindow(state.project.parent_project_id); });
   $('finish-delegation').addEventListener('click', finishDelegation); $('cancel-delegation').addEventListener('click', cancelDelegation); $('refresh-delegations').addEventListener('click', () => loadDelegations());
   $('attach-button').addEventListener('click', () => $('file-input').click()); $('file-input').addEventListener('change', e => uploadFiles(e.target.files));
   $('composer').addEventListener('dragover', e => { e.preventDefault(); if (canWrite()) $('composer').classList.add('drag-over'); }); $('composer').addEventListener('dragleave', e => { if (!$('composer').contains(e.relatedTarget)) $('composer').classList.remove('drag-over'); }); $('composer').addEventListener('drop', e => { e.preventDefault(); $('composer').classList.remove('drag-over'); if (e.dataTransfer?.files?.length) uploadFiles(e.dataTransfer.files); });
@@ -865,7 +914,7 @@
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDrawers(); });
   document.querySelectorAll('[data-tab]').forEach(b => { b.setAttribute('aria-controls', `panel-${b.dataset.tab}`); b.addEventListener('keydown', e => { if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return; e.preventDefault(); const tabs = [...document.querySelectorAll('[data-tab]')]; const index = tabs.indexOf(b); const next = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 : (index + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length; tabs[next].focus(); tabs[next].click(); }); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { heartbeat(state.epoch); if (state.project && !state.source) connectEvents(state.epoch); } });
-  window.addEventListener('online', () => { if (state.project) { clearTimeout(state.reconnectTimer); connectEvents(state.epoch); } }); window.addEventListener('offline', () => setConnection('reconnecting', '等待网络恢复')); window.addEventListener('beforeunload', stopEvents);
+  window.addEventListener('online', () => { if (state.project) { clearTimeout(state.reconnectTimer); connectEvents(state.epoch); } }); window.addEventListener('offline', () => setConnection('reconnecting', '等待网络恢复')); window.addEventListener('beforeunload', () => { stopEvents(); closePendingTaskWindow(); });
   async function boot() { try { const session = await api('/session'); if (session?.authenticated) await startSession(session); else showLogin(); } catch (err) { $('boot').replaceChildren(el('span', '', 'Shui!'), el('p', '', err.message), button('重新连接', 'btn primary', boot, 'refresh')); } }
   boot();
 })();

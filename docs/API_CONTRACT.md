@@ -96,6 +96,14 @@ Parent `delegation.created` and `delegation.updated` events carry task metadata,
 progress, and the submitted summary. Child dialogue and native tool events stay
 on the child event channel. Native histories are neither copied nor forked.
 
+The browser opens child sessions in separate windows using
+`/?project={parent_id}&session={child_id}`; parent windows use
+`/?project={parent_id}`. URL state takes precedence over per-window session
+storage. Opening or refreshing a child does not navigate the parent window.
+These links contain no credentials and retain the normal login and membership
+checks. Submitting a summary leaves the child window open in read-only mode;
+the parent receives the integration turn through its existing event stream.
+
 ## Adapter interface (`shui/agents.py`)
 
 ```python
