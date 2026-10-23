@@ -2,6 +2,8 @@
 
 <img src="web/icon.png" alt="Shui!" width="64" height="64">
 
+在「大水理论」与「快科研」的倡议下，我快速实现了这个项目。
+
 One paper, one project, one shared Codex or Claude Code conversation.
 
 Team deployment: <http://192.0.2.10/shui/> redirects to the current HTTPS
