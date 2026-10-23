@@ -6,7 +6,7 @@ Use a macOS or Linux account with the intended experiment permissions. Install
 the two provider CLIs, sign in as that account, and confirm the selected model
 is available. A CLI binary being present is not a login or quota check.
 
-Install Shui from this private repository into a virtual environment. Keep
+Install Shui from the repository into a virtual environment. Keep
 `SHUI_DATA_DIR` on persistent local SSD storage, outside the source checkout.
 SQLite and the agent session files need a single host with working file locks.
 For multiple GPU machines, agents can use the host account's SSH setup; Shui
@@ -39,6 +39,7 @@ alone does not reliably set a resumed thread's compaction threshold. The default
 is `200000`, and invalid values fail before the native process is launched.
 
 ```sh
+sudo install -m 0644 deploy/shui.service /etc/systemd/system/shui.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now shui
 sudo journalctl -u shui -f

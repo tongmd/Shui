@@ -1,184 +1,122 @@
+<div align="center">
+
+<img src="web/icon.png" alt="Shui!" width="80" height="80">
+
 # Shui!
 
-<img src="web/icon.png" alt="Shui!" width="64" height="64">
+**A shared workspace for research with coding agents.**
 
-在「大水理论」与「快科研」的倡议下，我快速实现了这个项目。
+[Project page](https://stonezhang.com/shui/) · [Quick start](#quick-start) · [Deployment](docs/DEPLOYMENT.md) · [API](docs/API_CONTRACT.md)
 
-One paper, one project, one shared Codex or Claude Code conversation.
+</div>
 
-Team deployment: <http://192.0.2.10/shui/> redirects to the current HTTPS
-service. See [public deployment details](docs/PUBLIC_DEPLOYMENT.md).
+Shui brings your team into the same Codex or Claude Code conversation. Keep one
+project per paper, delegate focused tasks to teammates, and bring their results
+back into a shared research workflow.
 
-Shui gives a research team a shared transcript, file uploads, live agent output,
-and an ordered task queue. Each message records its author. Every collaborator
-continues the project's existing native agent conversation. Projects run in
-parallel; turns within a project run in order.
+## Why Shui?
 
-To delegate, type **@** in the main conversation and choose project members,
-or write a complete project username directly, including Chinese sentences
-such as `跟@memberli看一看这个方案`. Shui shows the matched members and changes
-the send button to **分派任务** before submission. Usernames must match current
-project members; email addresses, URLs, escaped mentions, and code do not assign
-tasks. The original message text is preserved. Collaboration sessions appear
-under their parent project in the left sidebar, with links on their task cards.
-Each member has one dedicated collaboration session per project. Later tasks
-mentioning the same member return to that session and reuse its native agent
-history. Mentioning multiple members sends work to each member's own session.
-Every current project member can view that session from its task card or the
-**Tasks** panel. The main agent keeps its own conversation; child dialogue is
-not appended to its context. Add optional focused background when assigning.
+- **Shared context.** Every project keeps a persistent native agent session,
+  an attributed conversation, files, and live output.
+- **Focused collaboration.** Mention a project member with `@username` to
+  delegate work. Each member's dedicated session retains its own context across
+  tasks; completed summaries return to the main conversation for integration.
+- **Predictable execution.** Tasks run in order within each session. Separate
+  projects and delegated sessions can work in parallel.
+- **Research in view.** Track experiments, claims, validation targets, results,
+  and figures in the Research panel. Connect your repository and Overleaf project.
+- **Your tools, your host.** Use installed Codex and Claude Code CLIs with the
+  files, compute, and tools available to your host account.
 
-When the work is ready, choose **完成并汇总** in the child session, review the
-result summary, and submit it. The summary and artifact references enter the
-main agent's queue for integration. The main conversation receives the result
-live, and the child session keeps its completed transcript. Each session has
-its own shareable URL, so browser tabs and refreshes retain the selected session.
-Each member's collaboration uses its own workspace and native session. A new
-task after completion uses the same session, preserving earlier discussion and
-submitted summaries. Child agents are instructed to treat parent files as
-read-only references and place each task's proposed changes in its task folder.
-As with other Shui agents, this is not an operating-system sandbox.
+## Quick start
 
-Paste text or screenshots into the message box with **Ctrl+V** (**Command+V**
-on macOS). Pasted images upload as attachments; accompanying text stays in the
-message box, and nothing is sent until you press Send. Use a message's **Copy**
-button to copy its full text. Image previews also offer **Copy image** and
-**Ctrl+C / Command+C** when no text is selected. Normal text selection and
-copy/paste shortcuts continue to work.
+Requires **Python 3.11+**, **uv**, and at least one installed, signed-in **Codex**
+or **Claude Code** CLI on macOS or Linux. Sign in to the CLI as the same operating
+system user that runs Shui.
 
-Each project also has a **Research** panel. It lists experiments, the claim and
-validation target for each one, current results, and paper figures. PNG, JPEG,
-WebP, GIF, SVG, and PDF figures produced in the project workspace appear as
-soon as the files are stable and open in an inline preview. The agent maintains
-`research.json` in the workspace root to connect figures to experiments and
-record their claims, validation methods, and findings. Existing entries are
-updated by stable key; numeric result values remain exact strings.
-
-## Start locally
-
-Requires Python 3.11+ on macOS or Linux, and at least one installed, signed-in
-`codex` or `claude` CLI. Use the same host account for CLI login and Shui.
+Agent processes also require an available HTTP or SOCKS proxy. The default is
+`http://127.0.0.1:7890`; set `SHUI_PROXY_URL` before starting Shui if your proxy
+uses a different address.
 
 ```sh
-git clone git@github.com:tongmd/Shui.git
+git clone https://github.com/tongmd/Shui.git
 cd Shui
+uv sync --frozen --extra dev
+uv run shui init-owner --username owner --display-name Owner --generate-password
+uv run shui serve
+```
+
+Open **<http://127.0.0.1:18940>**. The bootstrap command reports the location of a
+private `owner-login.txt` containing your generated login. Create a project,
+choose an agent, and send your first instruction.
+
+Configure the model in project settings for your CLI account.
+
+<details>
+<summary>Install with pip instead</summary>
+
+```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/shui init-owner --username owner --display-name Owner --generate-password
 .venv/bin/shui serve
 ```
 
-The committed `uv.lock` records the tested dependency resolution. With `uv`
-installed, `uv sync --frozen --extra dev` can replace the virtual-environment
-creation and pip installation steps above.
+</details>
 
-Open <http://127.0.0.1:18940>. The bootstrap command prints the location of a
-private `owner-login.txt` file, readable only by the host account. It never
-prints the generated password. Alternatively, omit `--generate-password` to
-choose a password interactively. `SHUI_OWNER_PASSWORD` can supply a password
-for unattended bootstrap and is removed from the CLI environment after reading.
+## A research workflow
 
-The owner has access to every project and can create accounts, assign project
-members, configure models, and cancel any project turn. Members can be editors
-or viewers. An editor can submit tasks and uploads; a viewer can read and download.
+1. **Start a project.** Add your paper's repository and Overleaf links. Start a
+   new agent conversation or bind an existing native session.
+2. **Work together.** Invite project editors or viewers. Share instructions,
+   upload files, paste screenshots, and follow the same live transcript.
+3. **Delegate a question.** Type `@` to select a member. Their task opens in a
+   separate workspace and persistent session, with optional focused background.
+4. **Bring results back.** Submit a completed task's summary and artifact
+   references to the parent session's queue.
+5. **Follow the evidence.** The Research panel reads `research.json` and shows
+   experiment records alongside figures produced in the workspace.
 
-New team accounts start with their username as the initial password. Their
-first sign-in opens a mandatory password-change page. Project data and actions
-remain unavailable until they set a new password. Password changes rotate the
-current login and revoke every earlier login for that account.
+Native conversation bindings persist across restarts. Failed or interrupted
+turns remain visible and pause their queue until a new instruction or explicit
+retry; work is never silently repeated.
 
-The **Team accounts** screen manages each person's status, role, and project
-assignments in one place. An owner can reset another member's password to their
-username, requiring another password change. Disabling an account signs it out;
-removing task permissions cancels its pending work and requests cancellation
-of its current task. The primary owner cannot be disabled or demoted there.
+## Self-hosting
 
-Each project stores one GitHub repository link and one Overleaf project link,
-editable in project settings and available directly in the project header.
-Those resources are also included in the shared agent's task context. Existing
-projects can add their links when ready. Team account roles manage access
-inside Shui; external GitHub and Overleaf membership follows those services'
-own permissions.
+Shui runs one web worker per data directory. SQLite stores project state; native
+agent histories remain on the host. Project membership controls web access.
+Agents run with the host account's full permissions, so use a trusted team and
+a dedicated account with the access you intend to grant.
 
-## Shared sessions and execution
+| Setting | Purpose |
+| --- | --- |
+| `SHUI_DATA_DIR` | Persistent database and workspaces; defaults to `~/.local/share/shui` |
+| `SHUI_PUBLIC_ORIGIN` | Exact browser origin, including scheme and port |
+| `SHUI_PROXY_URL` | Proxy used by agent subprocesses |
+| `SHUI_CODEX_BIN` / `SHUI_CLAUDE_BIN` | CLI executable names or paths |
+| `SHUI_CODEX_MODEL` | Default Codex model; project settings take precedence |
 
-- Create one project per paper, then add the collaborators to that project.
-- Choose Codex or Claude Code. An optional existing native session ID binds the
-  project to that conversation. Otherwise the first message creates the native
-  conversation and saves its ID before submitting the task.
-- All project agents run with full host-account permissions. Codex uses
-  `danger-full-access` and no approvals. Claude uses `bypassPermissions`.
-  Agents can edit files and run experiments using the host's available tools,
-  credentials and SSH configuration.
-- File uploads only store files. A later, explicit task can ask the agent to
-  read or use an attachment. Uploading does not execute it.
-- Failed or interrupted turns pause the remaining queue. A new request or
-  explicit retry resumes processing. Retry is never automatic because an
-  interrupted experiment may already have made changes.
-- A session resume failure stays visible. Shui never silently creates a
-  replacement conversation or switches providers. A bound session cannot be
-  reassigned to another project.
+See [`.env.example`](.env.example) for additional settings and
+[Deployment](docs/DEPLOYMENT.md) for systemd, launchd, HTTPS, backups, and recovery.
+Environment variables are read from the process environment; `.env` files are
+not loaded automatically.
 
-Full access means the permissions of the operating-system account running Shui.
-It does not add root privileges. Project membership limits the web interface;
-it is not filesystem isolation between trusted collaborators' agent tasks.
-Native CLI histories stay on the host. When binding an existing conversation,
-the agent retains that context; Shui's transcript starts with messages sent
-through Shui. Do not simultaneously send turns to a bound session from another
-CLI or application.
-
-## Configuration
-
-Environment variables are read from the process environment. `.env.example`
-documents the settings; Shui does not automatically load `.env` files.
-
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `SHUI_DATA_DIR` | `~/.local/share/shui` | SQLite database and project workspaces |
-| `SHUI_HOST` | `127.0.0.1` | Web listen address |
-| `SHUI_PORT` | `18940` | Web port |
-| `SHUI_PUBLIC_ORIGIN` | `http://127.0.0.1:18940` | Exact browser origin, including scheme and port |
-| `SHUI_PROXY_URL` | `http://127.0.0.1:7890` with `shui serve` | Required proxy for agent child processes |
-| `SHUI_CODEX_MODEL` | `gpt-6.1-sol` | Default Codex model; project settings take precedence |
-| `SHUI_CODEX_AUTO_COMPACT_TOKEN_LIMIT` | `200000` | Positive integer native compaction threshold, passed explicitly on thread start/resume |
-| `SHUI_CODEX_BIN` | `codex` | Executable name or absolute path |
-| `SHUI_CLAUDE_BIN` | `claude` | Executable name or absolute path |
-| `SHUI_AGENT_TIMEOUT_SECONDS` | `3600` | Maximum time for one agent turn, up to 86400 |
-| `SHUI_AGENT_IDLE_TIMEOUT_SECONDS` | `1800` | Maximum silence between CLI protocol messages |
-| `SHUI_PROJECT_UPLOAD_QUOTA` | `5368709120` | Total uploaded bytes per project |
-
-Agent subprocesses inherit the proxy through upper- and lower-case
-`HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY`. Only loopback is in `NO_PROXY`.
-The service fails an agent launch if the proxy setting is missing or invalid.
-Environment variables configure routing; software that ignores them needs a
-host-level network rule when enforced proxy routing is required.
-
-Each upload is limited to 50 MiB. Project artifacts and PDFs are available from
-the files panel. Authentication uses password hashes and HttpOnly cookies;
-mutating requests require a CSRF token. Use HTTPS when exposing Shui remotely.
-Native CLI credentials remain on the host. Keep its data directory and CLI
-configuration out of Git.
-
-## Administration
+## Development
 
 ```sh
-# Run with another data directory and port.
-SHUI_PUBLIC_ORIGIN=http://127.0.0.1:18941 \
-  .venv/bin/shui --data-dir /path/on/ssd/shui serve --port 18941
-
-# Password recovery also signs that account out of every browser.
-.venv/bin/shui reset-password owner
-
-# Run the regression tests without real model calls.
-.venv/bin/python -m pytest -q
+uv sync --frozen --extra dev
+uv run python -m pytest -q
+node --test tests/*.js tests/*.cjs
 ```
 
-Run one web worker per data directory. Different projects can still execute
-concurrently. Persistent process and session locks reject competing Shui
-workers. Back up the database, workspaces, and native CLI histories together
-while the service is stopped.
+The regression suites run without real model calls. The frontend uses plain
+JavaScript and CSS in `web/`; no frontend build step is required.
 
-See [deployment](docs/DEPLOYMENT.md), [API contract](docs/API_CONTRACT.md), and
-[agent protocol details](docs/AGENT_PROTOCOLS.md).
+Bug reports and pull requests are welcome. Include reproduction steps for
+issues and relevant tests for behavior changes. Protocol and endpoint details
+are in [Agent protocols](docs/AGENT_PROTOCOLS.md) and
+[API contract](docs/API_CONTRACT.md).
 
-The interface uses the bundled colorful brain icon.
+## Origin
+
+在「大水理论」与「快科研」的倡议下，我快速实现了这个项目。
