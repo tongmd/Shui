@@ -222,6 +222,7 @@
     state.projects = state.projects.filter(project => String(project.id) !== String(id)); showWelcome(); if (message) toast(message); await loadProjects();
   }
   async function selectProject(id, parentId = null) {
+    const keepIdeasView=location.hash==='#ideas';window.ShuiGovernance?.close();if(keepIdeasView)history.replaceState(null,'','#ideas');
     if (!state.user || state.user.must_change_password) return;
     if (String(state.project?.id) === String(id) && !state.projectLoading) { closeDrawers(); return; }
     closePendingTaskWindow();
@@ -239,6 +240,7 @@
       if (d.project.active_turn) state.turns.set(String(d.project.active_turn.id), d.project.active_turn);
       state.projectLoading = false; state.historyMore = (d.messages || []).length >= 100; rememberSessionView(d.project); updateProjectInList(d.project); renderHeader(); renderMessages(); renderFiles(); renderMembers(); renderInsights(); renderTab(); updateComposer(); scrollBottom();
       connectionHealth(); connectEvents(epoch); state.lastMetaPoll = Date.now(); pollEvents(epoch); heartbeat(epoch); state.heartbeat = setInterval(() => heartbeat(epoch), 25000); loadWorkspace(''); loadDelegations();
+      if(location.hash==='#ideas')openIdeasWorkspace();
     } catch (err) { if (epoch !== state.epoch) return; if (err.status === 404 || err.status === 403) { await projectUnavailable(id); return; } state.projectLoading = false; $('messages').replaceChildren(); $('project-error').replaceChildren(el('span', '', err.message), button('重试', 'quiet-btn', () => { state.project = null; selectProject(id); }, 'refresh')); $('project-error').hidden = false; setConnection('', '未连接'); updateComposer(); }
   }
   function updateProjectInList(p) { if (!p.parent_project_id) { const i = state.projects.findIndex(x => x.id === p.id); if (i >= 0) state.projects[i] = { ...state.projects[i], ...p }; else state.projects.unshift(p); } renderProjects(); }
@@ -1090,11 +1092,15 @@
   });
   async function logout() { try { await api('/logout', { method: 'POST', body: {} }); showLogin(); } catch (err) { toast(err.message, 'error'); } }
   $('logout').addEventListener('click', logout); $('password-logout').addEventListener('click', logout);
-  $('open-governance').addEventListener('click', () => {
-    if (!state.project) return;
-    window.ShuiGovernance.open({projectId: parentProjectId(), user: state.user, csrf: state.csrf, role: state.project.role,
-      onOpenSession: async (turnId) => { window.ShuiGovernance.close(); await selectProject(parentProjectId()); }});
-  });
+  function openIdeasWorkspace() {
+    if (!state.project || state.projectLoading) return;
+    if(location.hash!=='#ideas')history.replaceState(null,'','#ideas');
+    window.ShuiGovernance.open({projectId: parentProjectId(), user: state.user, csrf: state.csrf, role: state.project.role, members:state.members, mount:$('project-view'),
+      onClose:()=>{if(location.hash==='#ideas')history.replaceState(null,'',location.pathname+location.search);},
+      onOpenSession: async () => { window.ShuiGovernance.close(); await selectProject(parentProjectId()); }});
+  }
+  $('open-governance').addEventListener('click', openIdeasWorkspace);
+  window.addEventListener('hashchange',()=>{if(location.hash==='#ideas')openIdeasWorkspace();});
   $('create-project').addEventListener('click', createProject); $('welcome-create').addEventListener('click', createProject); $('project-settings').addEventListener('click', projectSettings); $('add-member').addEventListener('click', addMember); $('manage-users').addEventListener('click', manageUsers);
   $('project-search').addEventListener('input', renderProjects); $('composer').addEventListener('submit', sendMessage); $('message-input').addEventListener('input', () => { const t = $('message-input'); t.style.height = 'auto'; t.style.height = `${Math.min(190, t.scrollHeight)}px`; updateComposer(); updateMentions(); });
   $('message-input').addEventListener('keydown', event => { if (handleMentionKey(event)) return; if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) { event.preventDefault(); sendMessage(); } });
