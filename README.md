@@ -31,7 +31,9 @@ evidence, and saved credentials now stay with the same project.
 
 ## Ideas and resources
 
-Open **想法与资源** in a project. Write an idea, revise it, collect feedback,
+CircuIdea is the ideas module inside Shui, sharing its projects, members, and accounts.
+Open [Ideas](https://shui-app.stonezhang.com/#ideas) or choose 想法与资源 in a project.
+Organize parent and child ideas in the tree, move existing ideas, revise them, collect feedback,
 and request GPU hours or model tokens. A request belongs to an exact idea revision;
 approvers can approve all or part of it, reject it, or receive an escalated request.
 Owners register editor approvers and their upstream authority. Upstream allocations fund downstream approvals without reserving the same capacity
