@@ -198,3 +198,5 @@ metadata, not remote key validation. A credential resolved for approved executio
 is passed internally to the subprocess, not included in API responses or ledger
 payloads. Governance hashes cover ordered events and current object state; verification
 detects inconsistencies with that stored chain, not an independent external anchor.
+
+`POST /api/projects/{pid}/ideas/{iid}/executions/{eid}/acceptance` appends a terminal execution review (`accept`, `changes`, or `reject`) with a required reason and optional evidence. The project owner or actual resource approver reviews; ordinary executors cannot approve themselves. Reviews bind the executed idea revision, remain append-only, and never rewrite the original turn status or consumption. A failed experiment may be accepted as useful evidence without claiming the task succeeded.

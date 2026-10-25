@@ -159,7 +159,7 @@
   async function loadProjects(preferId) {
     if (!state.user || state.user.must_change_password) return;
     $('project-list').replaceChildren(el('div', 'skeleton'), el('div', 'skeleton'));
-    try { const data = await api('/projects'); state.projects = (data.projects || []).filter(p => !p.parent_project_id); renderProjects(); const view = preferredSessionView(); const id = preferId || view?.parent_id || stored('shui-project'); const next = state.projects.find(p => String(p.id) === String(id)) || state.projects[0]; const child = !preferId && String(next?.id) === String(view?.parent_id) ? view?.child_id : null; if (next) await selectProject(child || next.id, child ? next.id : null); else showWelcome(); window.ShuiIdeaTransfer?.onSession({user:state.user,csrf:state.csrf,projects:state.projects,onSelectProject:selectProject}); }
+    try { const data = await api('/projects'); state.projects = (data.projects || []).filter(p => !p.parent_project_id); renderProjects(); const view = preferredSessionView(); const id = preferId || view?.parent_id || stored('shui-project'); const next = state.projects.find(p => String(p.id) === String(id)) || state.projects[0]; const child = !preferId && String(next?.id) === String(view?.parent_id) ? view?.child_id : null; if (next) await selectProject(child || next.id, child ? next.id : null); else showWelcome(); window.ShuiIdeaTransfer?.onSession({user:state.user,csrf:state.csrf,projects:state.projects,onSelectProject:async pid=>{await selectProject(pid);$('open-governance').click();}}); }
     catch (err) { $('project-list').replaceChildren(el('p', 'empty-small', err.message), button('重新加载', 'quiet-btn', () => loadProjects(), 'refresh')); setConnection('', '加载失败'); }
   }
   function renderProjects() {

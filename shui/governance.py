@@ -125,15 +125,30 @@ def install_governance(app, store, auth, access, coordinator):
 
     @app.get('/api/projects/{pid}/governance')
     async def read(pid:str,request:Request):
-        access(request,pid)
+        viewer,viewer_role=access(request,pid)
         with store.connect() as c:
-            result={k:rows(c,pid,v) for k,v in [('ideas','idea'),('revisions','revision'),('feedback','feedback'),('resource_requests','request'),('pools','pool'),('allocations','allocation'),('receipts','receipt'),('executions','execution')]}
+            result={k:rows(c,pid,v) for k,v in [('ideas','idea'),('revisions','revision'),('feedback','feedback'),('resource_requests','request'),('pools','pool'),('allocations','allocation'),('receipts','receipt'),('executions','execution'),('acceptances','acceptance')]}
             for execution in result['executions']:
                 t=c.execute('SELECT status FROM turns WHERE id=? AND project_id=?',(execution['turn_id'],pid)).fetchone()
                 execution['status']=t['status'] if t else 'missing'
                 m=c.execute("SELECT content,error FROM messages WHERE turn_id=? AND role='assistant'",(execution['turn_id'],)).fetchone()
                 execution['result']=m['content'] if m else ''
                 execution['error']=m['error'] if m else None
+                execution['can_acceptance']=False
+                if execution['kind']=='execution' and execution['status'] in ('complete','failed','cancelled'):
+                    a=get(c,pid,execution['allocation_id'],'allocation');r=get(c,pid,a['request_id'],'request');idea=get(c,pid,execution['idea_id'],'idea')
+                    can_review=viewer_role=='owner' or (r.get('decided_by')==viewer['id'] and viewer_role=='editor' and any(v['user_id']==viewer['id'] for v in rows(c,pid,'authority')))
+                    execution['can_acceptance']=bool(can_review and idea['revision']==execution['revision'] and (execution['author_id']!=viewer['id'] or viewer['role']=='owner'))
+            for idea in result['ideas']:
+                executions=[e for e in result['executions'] if e['idea_id']==idea['id'] and e['revision']==idea['revision'] and e['kind']=='execution']
+                latest=executions[-1] if executions else None
+                idea['status']='draft'
+                if latest:
+                    reviews=[r for r in result['acceptances'] if r['execution_id']==latest['id']]
+                    if latest['status'] in ('queued','running'):idea['status']='running'
+                    elif reviews:idea['status']='accepted' if reviews[-1]['decision']=='accept' else 'changes_requested'
+                    elif latest['status'] in ('complete','failed','cancelled'):idea['status']='awaiting_review'
+                elif any(r['idea_id']==idea['id'] and r['revision']==idea['revision'] and r['status']=='pending' for r in result['resource_requests']):idea['status']='awaiting_resources'
             authorities={a['user_id']:a for a in rows(c,pid,'authority')}
             result['approvers']=[{'id':u['id'],'name':u['display_name'],'username':u['username'],'parent_id':authorities.get(u['id'],{}).get('parent_id'),'is_owner':store.project_role(c,pid,dict(u))=='owner'} for u in c.execute('SELECT * FROM users WHERE is_active=1') if store.project_role(c,pid,dict(u))=='owner' or (store.project_role(c,pid,dict(u))=='editor' and u['id'] in authorities)]
             result['ledger']=verify(c,pid)
@@ -350,3 +365,30 @@ def install_governance(app, store, auth, access, coordinator):
             if n<Decimal(child['amount']):raise HTTPException(400,'Upstream request must cover the child request')
             parent={**child,'id':uid(),'parent_id':None,'author_id':u['id'],'approver_id':approver,'reason':text(d,'reason'),'amount':str(n),'created_at':now()}
             save(c,pid,'request',parent);child['parent_id']=parent['id'];save(c,pid,'request',child);event(c,pid,u,'resource.escalated',{'child':child,'upstream':parent});return {'request':child,'upstream':parent}
+
+    @app.post('/api/projects/{pid}/ideas/{iid}/executions/{eid}/acceptance',status_code=201)
+    async def accept_execution(pid:str,iid:str,eid:str,request:Request):
+        access(request,pid,True);d=await body(request)
+        with store.connect() as c:
+            u=begin(c,request,pid);idea=get(c,pid,iid,'idea');execution=get(c,pid,eid,'execution')
+            if execution['idea_id']!=iid or execution['kind']!='execution':raise HTTPException(404,'Execution not found for this idea')
+            if execution['revision']!=idea['revision']:raise HTTPException(409,'Review must match the current idea revision')
+            allocation=get(c,pid,execution['allocation_id'],'allocation');resource=get(c,pid,allocation['request_id'],'request')
+            owner=store.project_role(c,pid,u)=='owner'
+            if not owner:
+                if resource.get('decided_by')!=u['id']:raise HTTPException(403,'Only the resource approver or project owner may review execution')
+                authority(c,pid,u['id'])
+            if execution['author_id']==u['id'] and u['role']!='owner':raise HTTPException(403,'An independent reviewer must review your execution')
+            turn=c.execute('SELECT status FROM turns WHERE id=? AND project_id=?',(execution['turn_id'],pid)).fetchone()
+            if not turn or turn['status'] not in ('complete','failed','cancelled'):raise HTTPException(409,'Execution must finish before acceptance')
+            decision=d.get('decision')
+            if decision not in ('accept','changes','reject'):raise HTTPException(400,'Invalid acceptance decision')
+            note=text(d,'note');evidence=text(d,'evidence',False)
+            fingerprint=hashlib.sha256(dump({'execution_id':eid,'actor':u['id'],'decision':decision,'note':note,'evidence':evidence}).encode()).hexdigest()
+            key=d.get('client_id') or fingerprint
+            for prior in rows(c,pid,'acceptance'):
+                if prior.get('client_id')==key:
+                    if prior['request_hash']!=fingerprint:raise HTTPException(409,'Idempotency key has different acceptance content')
+                    return prior
+            x={'id':uid(),'idea_id':iid,'revision':execution['revision'],'execution_id':eid,'turn_id':execution['turn_id'],'turn_status':turn['status'],'decision':decision,'note':note,'evidence':evidence,'reviewed_by':u['id'],'created_at':now(),'client_id':key,'request_hash':fingerprint}
+            save(c,pid,'acceptance',x);event(c,pid,u,'execution.acceptance',x);return x

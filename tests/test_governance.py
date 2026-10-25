@@ -190,3 +190,27 @@ def test_real_manager_chain_requires_upstream_funding(setup):
         assert {a['id'] for a in snap['approvers']}=={ids['owner'],ids['director'],ids['supervisor']}
     finally:
         for client in managers.values():client.close()
+
+def test_terminal_acceptance_is_independent_immutable_and_idempotent(setup,monkeypatch):
+    app,cs,b,pid=setup;o=cs['owner'];m=cs['member']
+    monkeypatch.setattr(app.state.coordinator,'kick',lambda pid:None)
+    i=m.post(b+'/ideas',json={'title':'Verify result','body':'Negative results are valid outcomes'}).json()
+    o.post(b+'/resource-pools',json={'kind':'tokens','unit':'tokens','capacity':100})
+    r=m.post(b+'/resource-requests',json={'idea_id':i['id'],'kind':'tokens','unit':'tokens','amount':80,'reason':'Stage'}).json()
+    a=o.post(b+f"/resource-requests/{r['id']}/decision",json={'decision':'approve'}).json()['allocation_id']
+    execution=m.post(b+f"/ideas/{i['id']}/execute",json={'allocation_id':a,'content':'Run bounded stage'}).json()['execution']
+    url=b+f"/ideas/{i['id']}/executions/{execution['id']}/acceptance"
+    body={'decision':'accept','note':'Negative outcome is reproducible and meets the evaluation plan','evidence':'Run report 22','client_id':'review-once'}
+    assert o.post(url,json=body).status_code==409
+    assert m.post(url,json=body).status_code==403
+    assert o.get(b+'/governance').json()['ideas'][0]['status']=='running'
+    with app.state.store.connect() as c:c.execute("UPDATE turns SET status='failed',error='Actual negative result' WHERE id=?",(execution['turn_id'],))
+    snap=o.get(b+'/governance').json();assert snap['ideas'][0]['status']=='awaiting_review' and snap['executions'][0]['can_acceptance']
+    accepted=o.post(url,json=body);assert accepted.status_code==201,accepted.text
+    again=o.post(url,json=body);assert again.json()['id']==accepted.json()['id']
+    assert o.post(url,json={**body,'decision':'reject'}).status_code==409
+    snap=o.get(b+'/governance').json();assert snap['ideas'][0]['status']=='accepted' and len(snap['acceptances'])==1 and snap['ledger']['valid']
+    assert snap['executions'][0]['status']=='failed' and snap['pools'][0]['consumed']=='0'
+    changed=o.post(url,json={'decision':'changes','note':'Additional controls required','client_id':'next-review'})
+    assert changed.status_code==201
+    snap=o.get(b+'/governance').json();assert len(snap['acceptances'])==2 and snap['ideas'][0]['status']=='changes_requested'

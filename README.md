@@ -53,6 +53,8 @@ physical GPUs, buy provider credit, or independently measure provider billing.
 The feedback ledger links events and state hashes; it is an application audit chain,
 not a published blockchain or proof that submitted evidence is true.
 
+The workspace is available at [shui-app.stonezhang.com](https://shui-app.stonezhang.com/). Execution results return to the idea for an explicit review; acceptance and requested changes stay with the executed version.
+
 ## Quick start
 
 Requires **Python 3.11+**, **uv**, and at least one installed, signed-in **Codex**
