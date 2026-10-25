@@ -196,7 +196,7 @@
     return value && validId(value.parent_id) && (!value.child_id || validId(value.child_id)) ? { parent_id: value.parent_id, child_id: value.child_id || null } : null;
   }
   function projectViewURL(parentId, childId = null) {
-    const url = new URL(location.href); url.searchParams.set('project', parentId); if (childId) url.searchParams.set('session', childId); else url.searchParams.delete('session'); url.hash = ''; return url.href;
+    const url = new URL(location.href); url.searchParams.set('project', parentId); if (childId) url.searchParams.set('session', childId); else url.searchParams.delete('session'); if(url.hash!=='#ideas')url.hash = ''; return url.href;
   }
   function preferredSessionView() {
     const url = new URL(location.href);
@@ -224,7 +224,7 @@
   async function selectProject(id, parentId = null) {
     const keepIdeasView=location.hash==='#ideas';window.ShuiGovernance?.close();if(keepIdeasView)history.replaceState(null,'','#ideas');
     if (!state.user || state.user.must_change_password) return;
-    if (String(state.project?.id) === String(id) && !state.projectLoading) { closeDrawers(); return; }
+    if (String(state.project?.id) === String(id) && !state.projectLoading) { closeDrawers(); if(keepIdeasView)openIdeasWorkspace(); return; }
     closePendingTaskWindow();
     const epoch = ++state.epoch; stopEvents(); closeDrawers(); state.projectLoading = true; state.messages.clear(); state.turns.clear(); state.tools.clear(); state.presence = []; state.activity = []; state.activityLoaded = false; state.insights = null; state.renderedInsights = null; state.insightsNeedsRefresh = true; state.insightRevision = 0; state.attachments = []; state.uploading = 0; state.pendingSend = null; state.sending = false; state.workspacePath = ''; state.cursor = 0; state.historyMore = true;
     resetDelegations();
