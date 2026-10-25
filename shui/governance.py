@@ -170,6 +170,15 @@ def install_governance(app, store, auth, access, coordinator):
         access(request,pid,True);d=await body(request)
         with store.connect() as c:
             u=begin(c,request,pid); x=get(c,pid,iid,'idea')
+            if 'parent_id' in d:
+                parent=d['parent_id']
+                if parent=='':parent=None
+                if parent is not None and not isinstance(parent,str):raise HTTPException(400,'Invalid parent idea')
+                cursor=parent;seen={iid}
+                while cursor:
+                    if cursor in seen:raise HTTPException(400,'An idea cannot be its own ancestor')
+                    seen.add(cursor);cursor=get(c,pid,cursor,'idea').get('parent_id')
+                x['parent_id']=parent
             x.update(title=text(d,'title',limit=500),body=text(d,'body',False),revision=x['revision']+1)
             save(c,pid,'idea',x); rev={**x,'id':uid(),'idea_id':iid,'author_id':u['id'],'created_at':now()};save(c,pid,'revision',rev);event(c,pid,u,'idea.revised',rev)
             return rev

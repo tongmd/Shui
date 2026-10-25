@@ -214,3 +214,26 @@ def test_terminal_acceptance_is_independent_immutable_and_idempotent(setup,monke
     changed=o.post(url,json={'decision':'changes','note':'Additional controls required','client_id':'next-review'})
     assert changed.status_code==201
     snap=o.get(b+'/governance').json();assert len(snap['acceptances'])==2 and snap['ideas'][0]['status']=='changes_requested'
+
+
+def test_reorganize_ideas_preserves_history_and_rejects_cycles(setup):
+    app,clients,base,pid=setup
+    editor=clients['member']
+    a=editor.post(base+'/ideas',json={'title':'Direction'}).json()
+    b=editor.post(base+'/ideas',json={'title':'Study','parent_id':a['id']}).json()
+    c=editor.post(base+'/ideas',json={'title':'Experiment','parent_id':b['id']}).json()
+    def revise(item,parent_marker):
+        return editor.post(base+f"/ideas/{item['id']}/revisions",json={'title':item['title'],'body':'kept','parent_id':parent_marker})
+    assert revise(a,c['id']).status_code==400
+    assert revise(b,b['id']).status_code==400
+    assert revise(b,None).status_code==201
+    moved=revise(a,c['id']);assert moved.status_code==201
+    assert moved.json()['parent_id']==c['id']
+    assert revise(c,'unknown').status_code==404
+    # Ordinary content edits keep the existing placement.
+    saved=editor.post(base+f"/ideas/{a['id']}/revisions",json={'title':'Direction updated','body':'kept'})
+    assert saved.status_code==201 and saved.json()['parent_id']==c['id']
+    state=editor.get(base+'/governance').json()
+    assert len(state['ideas'])==3
+    assert any(x['kind']=='idea.revised' for x in state['events'])
+    assert clients['viewer'].post(base+f"/ideas/{a['id']}/revisions",json={'title':'No','parent_id':None}).status_code==403
