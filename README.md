@@ -4,7 +4,7 @@
 
 # Shui!
 
-**A shared workspace for research with coding agents.**
+A shared workspace for ideas, resources, and research with coding agents.
 
 [Project page](https://stonezhang.com/shui/) · [Quick start](#quick-start) · [Deployment](docs/DEPLOYMENT.md) · [API](docs/API_CONTRACT.md)
 
@@ -12,7 +12,8 @@
 
 Shui brings your team into the same Codex or Claude Code conversation. Keep one
 project per paper, delegate focused tasks to teammates, and bring their results
-back into a shared research workflow.
+back into a shared research workflow. Ideas, feedback, resource approvals, execution
+evidence, and saved credentials now stay with the same project.
 
 ## Why Shui?
 
@@ -27,6 +28,30 @@ back into a shared research workflow.
   and figures in the Research panel. Connect your repository and Overleaf project.
 - **Your tools, your host.** Use installed Codex and Claude Code CLIs with the
   files, compute, and tools available to your host account.
+
+## Ideas and resources
+
+Open **想法与资源** in a project. Write an idea, revise it, collect feedback,
+and request GPU hours or model tokens. A request belongs to an exact idea revision;
+approvers can approve all or part of it, reject it, or receive an escalated request.
+Owners register editor approvers and their upstream authority. Upstream allocations fund downstream approvals without reserving the same capacity
+twice. Cancelling releases the unused balance after active work and child
+allocations have closed.
+
+Ask the project's installed agent to check evidence, draft a proposal, or prepare
+decision context. These assistance turns are read-only. An approved allocation can
+start an execution turn; results remain in the existing conversation. Record actual
+consumption with evidence and link its receipt to the turn.
+
+Project credentials are encrypted at rest. Explicit token submissions are saved and
+classified locally; the interface shows provider, purpose, endpoint, status and a
+fingerprint, never the saved value. Owners can add, rotate or revoke credentials.
+An allocation may refer to a credential for its approved execution subprocess.
+
+Resource accounts track approvals and reported consumption. They do not provision
+physical GPUs, buy provider credit, or independently measure provider billing.
+The feedback ledger links events and state hashes; it is an application audit chain,
+not a published blockchain or proof that submitted evidence is true.
 
 ## Quick start
 

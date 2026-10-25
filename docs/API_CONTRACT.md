@@ -150,4 +150,51 @@ async def run_agent(request: RunRequest, emit, cancel: asyncio.Event) -> RunResu
 def provider_status() -> list[dict]: ...
 ```
 
-Adapters MUST preserve returned native session id; error/timeout must never silently fork or fall back to an independent model. Full-access execution is an explicit owner deployment preference. Only one worker per project can send turns. Credentials are host CLI credentials, never sent to browsers or stored in SQLite. Child network calls inherit explicit SHUI_PROXY_URL through HTTP_PROXY/HTTPS_PROXY/ALL_PROXY, NO_PROXY only loopback. Stdout deltas and tool events streamed; avoid full unbounded process output. Any native approval request must be surfaced as an error or denied, never silently hang. Cancellation terminates owned process group, never unrelated CLI processes. Native histories survive through session id.
+Adapters MUST preserve returned native session id; error/timeout must never silently fork or fall back to an independent model. Full-access execution is an explicit owner deployment preference. Only one worker per project can send turns. CLI login credentials remain on the host. Separately saved project credential values are encrypted in SQLite and never returned by browser APIs. Child network calls inherit explicit SHUI_PROXY_URL through HTTP_PROXY/HTTPS_PROXY/ALL_PROXY, NO_PROXY only loopback. Stdout deltas and tool events streamed; avoid full unbounded process output. Any native approval request must be surfaced as an error or denied, never silently hang. Cancellation terminates owned process group, never unrelated CLI processes. Native histories survive through session id.
+
+## Ideas, resource approvals and credential inventory
+
+All routes below inherit project membership, CSRF and Origin checks. Owners manage pools, credentials and the approval hierarchy. Registered project
+editors can decide assigned requests using their funded upstream allocation;
+only an owner can fund a top-level approval directly from a pool. Editors can propose ideas, submit
+feedback and request resources. Mutations verify the existing governance history
+before appending an event. Amounts are positive decimal values with at most six
+decimal places. Capacity, reserved, consumed and remaining are returned as strings.
+
+| Method and project-relative route | Request / result |
+| --- | --- |
+| `GET governance` | Ideas, revisions, feedback, resource_requests, pools, allocations, receipts, executions, approvers, events and ledger verification |
+| `POST ideas` | `{title,body?,parent_id?}`; creates idea and revision 1 |
+| `POST ideas/{id}/revisions` | `{title,body?}`; appends a revision |
+| `POST ideas/{id}/feedback` | `{content,reply_to?}`; reply must reference feedback on this idea |
+| `POST ideas/import` | `{ideas:[{id,title,body?,summary?,reviews?,resources?,events?,tags?}]}`; up to 200 CircuIdea records, deduplicated by source ID |
+| `POST resource-approvers` | `{user_id,parent_id?}`; owner registers an active editor and immutable upstream approver; omitted parent leads to an owner |
+| `POST resource-pools` | `{kind,unit,capacity,credential_id?}`; unique resource kind/unit in project |
+| `POST resource-pools/{id}/capacity` | `{amount}`; adds recorded capacity |
+| `POST resource-requests` | `{idea_id,kind,unit,amount,reason,approver_id?,parent_id?}`; binds current revision |
+| `POST resource-requests/{id}/decision` | `{decision:'approve'|'reject',amount?,note?}`; partial approval uses a smaller amount |
+| `POST resource-requests/{id}/escalate` | `{approver_id,reason,amount?}`; creates and links an upstream pending request |
+| `POST resource-requests/{id}/cancel` | Releases unused allocation; active executions or child allocations must close first |
+| `POST allocations/{id}/receipts` | `{amount,evidence,turn_id?,outcome?,client_id?}`; reported usage, idempotent by key/content |
+| `POST ideas/{id}/assist` | `{kind:'check'|'draft'|'decision',content?,client_id?}`; queues a read-only native CLI turn |
+| `POST ideas/{id}/execute` | `{allocation_id,content?,client_id?}`; queues execution bound to an active allocation and the approved revision |
+| `GET credentials` | Metadata only: name/provider/category/purpose/endpoint/scopes/expiry/fingerprint/status/revision |
+| `POST credentials` | `{secret,name?,provider?,category?,purpose?,endpoint?,scopes?,expires_at?}` |
+| `POST credentials/{id}/rotate` | `{secret}`; rotates an active credential |
+| `POST credentials/{id}/revoke` | Erases the saved value and marks it revoked |
+
+Prefix every project-relative route with `/api/projects/{project_id}/`.
+Approval authority is scoped to the project. Escalation follows the registered
+upstream relationship; registration cannot silently reparent existing approvals.
+A resource request's kind and unit must match its parent and pool. Top-level
+approval reserves pool capacity; downstream approval transfers available parent
+allocation. Usage reduces remaining/reserved and increases consumed. Cancellation
+returns unused capacity upstream. No receipt implies no measured usage: the API
+does not infer tokens or GPU hours from a completed turn.
+
+Credentials captured from explicit token submissions are encrypted before storage
+and replaced with references in shared text. Category/provider summaries are local
+metadata, not remote key validation. A credential resolved for approved execution
+is passed internally to the subprocess, not included in API responses or ledger
+payloads. Governance hashes cover ordered events and current object state; verification
+detects inconsistencies with that stored chain, not an independent external anchor.

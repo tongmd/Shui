@@ -30,6 +30,8 @@ class RunRequest:
     session_id: str | None = None
     model: str | None = None
     project_id: str = ""
+    read_only: bool = False
+    resource_env: dict[str, str] = field(default_factory=dict, repr=False)
     # Earlier turns can still be recalled by the native session. Keep these
     # values out of diagnostics while continuing to suppress their echoes.
     secret_values: tuple[str, ...] = field(default=(), repr=False)
@@ -319,9 +321,15 @@ class _Output:
 
 class _Run:
     def __init__(self, request: RunRequest, emit: Emit, env: dict[str, str]):
-        self.request, self.emit, self.env = request, emit, env
+        self.request, self.emit, self.env = request, emit, dict(env)
+        if request.read_only and request.resource_env:
+            raise AgentError("Read-only assistance cannot receive resource credentials")
+        allowed = {"SHUI_RESOURCE_TOKEN", "SHUI_RESOURCE_ENDPOINT", "SHUI_RESOURCE_PROVIDER", "SHUI_RESOURCE_CREDENTIAL_ID"}
+        if set(request.resource_env) - allowed:
+            raise AgentError("Invalid resource environment")
+        self.env.update(request.resource_env)
         prompt_tokens = re.findall(r"(?i)\btoken:([^\s`'\"<>]{1,4096})", request.prompt)
-        self.redactor = _Redactor(env, (*request.secret_values, *prompt_tokens))
+        self.redactor = _Redactor(self.env, (*request.secret_values, *prompt_tokens))
         self.output = _Output(emit, self.redactor)
         self.session_id = request.session_id
         self.turn_id: str | None = None
@@ -682,7 +690,7 @@ async def _codex(run: _Run, binary: str) -> None:
             "-c",
             'approval_policy="never"',
             "-c",
-            'sandbox_mode="danger-full-access"',
+            'sandbox_mode="read-only"' if run.request.read_only else 'sandbox_mode="danger-full-access"',
         ]
     )
     async with asyncio.timeout(_seconds("SHUI_AGENT_HANDSHAKE_TIMEOUT_SECONDS", 60)):
@@ -695,7 +703,7 @@ async def _codex(run: _Run, binary: str) -> None:
         params: dict = {
             "cwd": str(run.request.workspace.resolve()),
             "approvalPolicy": "never",
-            "sandbox": "danger-full-access",
+            "sandbox": "read-only" if run.request.read_only else "danger-full-access",
             # Thread binding reloads config; process-level -c overrides alone
             # do not reliably reach the resumed thread's compaction policy.
             "config": {"model_auto_compact_token_limit": auto_compact_token_limit},
@@ -720,7 +728,7 @@ async def _codex(run: _Run, binary: str) -> None:
         "input": [{"type": "text", "text": run.request.prompt}],
         "cwd": str(run.request.workspace.resolve()),
         "approvalPolicy": "never",
-        "sandboxPolicy": {"type": "dangerFullAccess"},
+        "sandboxPolicy": {"type": "readOnly"} if run.request.read_only else {"type": "dangerFullAccess"},
     }
     params["model"] = model
     run.generation_started = True
@@ -769,6 +777,10 @@ async def _claude(run: _Run, binary: str) -> None:
         "--resume" if existing else "--session-id",
         session_id,
     ]
+    if run.request.read_only:
+        args[args.index("bypassPermissions")] = "plan"
+        args.remove("--dangerously-skip-permissions")
+        args.extend(["--tools", ""])
     if run.request.model:
         args.extend(["--model", run.request.model])
     await run.spawn(args)

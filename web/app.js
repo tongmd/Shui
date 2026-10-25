@@ -141,7 +141,7 @@
     if ($('form-dialog').open) $('form-dialog').close(); if ($('preview-dialog').open) $('preview-dialog').close(); closeDrawers(); renderUploads(); updateComposer();
   }
   function closeWorkspace() { clearProjectView(); state.projects = []; }
-  function showLogin() { closeWorkspace(); state.user = null; state.csrf = null; state.providers = []; $('boot').hidden = true; $('app').hidden = true; $('password-view').hidden = true; $('login-view').hidden = false; $('login-password').value = ''; $('password-form').reset(); }
+  function showLogin() { window.ShuiIdeaTransfer?.onSession(null); closeWorkspace(); state.user = null; state.csrf = null; state.providers = []; $('boot').hidden = true; $('app').hidden = true; $('password-view').hidden = true; $('login-view').hidden = false; $('login-password').value = ''; $('password-form').reset(); }
   function showPasswordChange() {
     const entering = $('password-view').hidden; closeWorkspace(); state.providers = [];
     $('boot').hidden = true; $('app').hidden = true; $('login-view').hidden = true; $('password-view').hidden = false;
@@ -159,7 +159,7 @@
   async function loadProjects(preferId) {
     if (!state.user || state.user.must_change_password) return;
     $('project-list').replaceChildren(el('div', 'skeleton'), el('div', 'skeleton'));
-    try { const data = await api('/projects'); state.projects = (data.projects || []).filter(p => !p.parent_project_id); renderProjects(); const view = preferredSessionView(); const id = preferId || view?.parent_id || stored('shui-project'); const next = state.projects.find(p => String(p.id) === String(id)) || state.projects[0]; const child = !preferId && String(next?.id) === String(view?.parent_id) ? view?.child_id : null; if (next) await selectProject(child || next.id, child ? next.id : null); else showWelcome(); }
+    try { const data = await api('/projects'); state.projects = (data.projects || []).filter(p => !p.parent_project_id); renderProjects(); const view = preferredSessionView(); const id = preferId || view?.parent_id || stored('shui-project'); const next = state.projects.find(p => String(p.id) === String(id)) || state.projects[0]; const child = !preferId && String(next?.id) === String(view?.parent_id) ? view?.child_id : null; if (next) await selectProject(child || next.id, child ? next.id : null); else showWelcome(); window.ShuiIdeaTransfer?.onSession({user:state.user,csrf:state.csrf,projects:state.projects,onSelectProject:selectProject}); }
     catch (err) { $('project-list').replaceChildren(el('p', 'empty-small', err.message), button('重新加载', 'quiet-btn', () => loadProjects(), 'refresh')); setConnection('', '加载失败'); }
   }
   function renderProjects() {
@@ -1090,6 +1090,11 @@
   });
   async function logout() { try { await api('/logout', { method: 'POST', body: {} }); showLogin(); } catch (err) { toast(err.message, 'error'); } }
   $('logout').addEventListener('click', logout); $('password-logout').addEventListener('click', logout);
+  $('open-governance').addEventListener('click', () => {
+    if (!state.project) return;
+    window.ShuiGovernance.open({projectId: parentProjectId(), user: state.user, csrf: state.csrf, role: state.project.role,
+      onOpenSession: async (turnId) => { window.ShuiGovernance.close(); await selectProject(parentProjectId()); }});
+  });
   $('create-project').addEventListener('click', createProject); $('welcome-create').addEventListener('click', createProject); $('project-settings').addEventListener('click', projectSettings); $('add-member').addEventListener('click', addMember); $('manage-users').addEventListener('click', manageUsers);
   $('project-search').addEventListener('input', renderProjects); $('composer').addEventListener('submit', sendMessage); $('message-input').addEventListener('input', () => { const t = $('message-input'); t.style.height = 'auto'; t.style.height = `${Math.min(190, t.scrollHeight)}px`; updateComposer(); updateMentions(); });
   $('message-input').addEventListener('keydown', event => { if (handleMentionKey(event)) return; if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) { event.preventDefault(); sendMessage(); } });

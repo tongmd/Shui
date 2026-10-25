@@ -31,7 +31,7 @@ COOKIE = "shui_session"
 MAX_UPLOAD = 50 * 1024 * 1024
 HTTP_SLOW_REQUEST_MS = 1000
 http_logger = logging.getLogger("shui.http")
-PUBLIC_ASSETS = frozenset({"app.js", "lucide-icons.js", "styles.css", "icon.svg", "icon.png", "favicon.ico"})
+PUBLIC_ASSETS = frozenset({"app.js", "lucide-icons.js", "styles.css", "icon.svg", "icon.png", "favicon.ico", "governance.js", "governance.css", "idea-transfer.js"})
 ACTIVE = ("queued", "running")
 FORBIDDEN_NAMES = {
     ".git",
@@ -1125,7 +1125,7 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
                     ))
                     for field, values in (("title", title_secrets), ("context", context_secrets)):
                         c.executemany("INSERT INTO delegation_request_secrets VALUES(?,?,?,?)", (
-                            (rid, field, position, value) for position, value in enumerate(values)
+                            (rid, field, position, store.vault.encrypt_secret(value)) for position, value in enumerate(values)
                         ))
                     c.execute("UPDATE delegation_turns SET request_id=? WHERE turn_id=?", (rid, queued["turn"]["id"]))
                     store.publish_enqueued_turn(c, queued["turn"])
@@ -2075,4 +2075,8 @@ def create_app(data_dir: Path | None = None, runner=None, start_worker=True):
             return Response(status_code=304, headers=headers)
         return FileResponse(path, stat_result=stat, headers=headers)
 
+    from .vault import install_vault
+    from .governance import install_governance
+    install_vault(app, store, auth, access)
+    install_governance(app, store, auth, access, coordinator)
     return app

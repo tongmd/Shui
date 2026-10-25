@@ -4,11 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#f5f3ec">
-  <title>Shui! · Research together</title>
+  <title>Shui!</title>
   <link rel="icon" type="image/png" sizes="96x96" href="/icon.png?v=brain-20260927">
   <link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=brain-20260927">
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/governance.css">
   <script defer src="/lucide-icons.js"></script>
+  <script defer src="/governance.js"></script>
+  <script defer src="/idea-transfer.js"></script>
   <script defer src="/app.js"></script>
 </head>
 <body>
@@ -46,7 +49,7 @@
       <header class="topbar"><button id="open-sidebar" class="icon-btn mobile-only" aria-label="打开项目导航" data-icon="menu"></button><div class="breadcrumb">工作空间 <span>/</span> <span id="breadcrumb-project">概览</span></div><div id="connection" class="connection"><span class="status-dot"></span><span id="connection-text">正在连接</span></div><button id="open-inspector" class="icon-btn inspector-toggle" aria-label="打开项目资料" data-icon="panel"></button></header>
       <section id="welcome" class="welcome"><div class="empty-mark" data-icon="folder"></div><h1>暂无研究项目</h1><button id="welcome-create" class="btn primary" hidden><span data-icon="plus"></span>新建项目</button></section>
       <section id="project-view" class="project-view" hidden>
-        <div class="project-header"><div class="project-heading"><h1 id="project-title"></h1><p id="project-description" class="project-description"></p><div class="project-meta"><span id="provider-pill" class="provider-pill"></span><span id="project-status" class="project-state"></span><span id="project-model" class="model-label"></span></div><div id="project-links" class="project-links" aria-label="关联项目" hidden></div></div><div class="project-header-actions"><div id="presence" class="presence" aria-label="在线成员"></div><button id="project-settings" class="icon-btn outlined" title="项目设置" aria-label="项目设置" data-icon="settings" hidden></button></div></div>
+        <div class="project-header"><div class="project-heading"><h1 id="project-title"></h1><p id="project-description" class="project-description"></p><div class="project-meta"><span id="provider-pill" class="provider-pill"></span><span id="project-status" class="project-state"></span><span id="project-model" class="model-label"></span></div><div id="project-links" class="project-links" aria-label="关联项目" hidden></div></div><div class="project-header-actions"><div id="presence" class="presence" aria-label="在线成员"></div><button id="open-governance" type="button" class="btn secondary">想法与资源</button><button id="project-settings" class="icon-btn outlined" title="项目设置" aria-label="项目设置" data-icon="settings" hidden></button></div></div>
         <div id="child-session-bar" class="child-session-bar" hidden><div class="child-session-heading"><a id="return-parent" class="quiet-btn" target="_blank" rel="noopener noreferrer">打开主会话 ↗</a><span id="child-session-status" class="delegation-status"></span></div><p id="child-session-info"></p><details id="child-session-context" class="child-session-context" hidden><summary>本轮初始背景与附件</summary><div id="child-session-context-body"></div></details><div class="child-session-actions"><button id="finish-delegation" type="button" class="btn secondary">完成并汇总</button><button id="cancel-delegation" type="button" class="quiet-btn danger">取消任务</button><span id="child-session-help" role="status"></span></div></div>
         <div id="queue-banner" class="queue-banner" hidden><span class="pulse-dot"></span><span id="queue-label"></span><button id="cancel-active" class="quiet-btn" hidden>停止当前任务</button></div>
         <div id="project-error" class="inline-notice error" role="alert" hidden></div>

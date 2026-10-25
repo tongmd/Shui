@@ -51,6 +51,30 @@ class Store:
         self.path = self.root / "shui.sqlite"
         (self.root / "projects").mkdir(exist_ok=True, mode=0o700)
         self.initialize()
+        # Keep private message values and the reusable credential catalog encrypted.
+        from .vault import Vault, PREFIX
+        self.vault = Vault(self)
+        migrated = False
+        with self.connect() as c:
+            c.execute("PRAGMA secure_delete=ON")
+            for table, keys in (("message_secrets", ("message_id", "position")),
+                                ("delegation_request_secrets", ("request_id", "field", "position"))):
+                for row in c.execute(f"SELECT * FROM {table}").fetchall():
+                    if row["value"].startswith(PREFIX):
+                        self.vault.decrypt_secret(row["value"])
+                        continue
+                    migrated = True
+                    where = " AND ".join(key + "=?" for key in keys)
+                    c.execute(f"UPDATE {table} SET value=? WHERE {where}",
+                              (self.vault.encrypt_secret(row["value"]), *(row[key] for key in keys)))
+        # Existing private message tokens join the encrypted reusable inventory once.
+        with self.connect() as c:
+            for row in c.execute("SELECT s.value,m.project_id,m.author_id FROM message_secrets s JOIN messages m ON m.id=s.message_id WHERE m.author_id IS NOT NULL").fetchall():
+                self.vault.capture_tokens(row["project_id"], row["author_id"], self.vault.decrypt_secret(row["value"]), connection=c)
+        if migrated:
+            with self.connect() as c:
+                c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                c.execute("VACUUM")
 
     @contextlib.contextmanager
     def connect(self):
@@ -409,6 +433,8 @@ class Store:
             json.dumps(attachments), at, None, client_id,
         ))
         self.store_message_secrets(c, mid, secrets)
+        if secrets:
+            self.vault.capture_tokens(project_id, user["id"], content, connection=c)
         c.execute("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?)", (
             aid, project_id, "assistant", "", None, "queued", tid, "[]", now(), None, None,
         ))
@@ -448,17 +474,16 @@ class Store:
 
         return TOKEN_PATTERN.sub(replace, content or ""), secrets
 
-    @staticmethod
-    def store_message_secrets(c, message_id, secrets):
+    def store_message_secrets(self, c, message_id, secrets):
         for index, value in enumerate(secrets):
             c.execute(
                 "INSERT INTO message_secrets VALUES(?,?,?)",
-                (message_id, index, value),
+                (message_id, index, self.vault.encrypt_secret(value)),
             )
 
     def message_content(self, c, row):
         secrets = [
-            secret["value"]
+            self.vault.decrypt_secret(secret["value"])
             for secret in c.execute(
                 "SELECT value FROM message_secrets WHERE message_id=? ORDER BY position",
                 (row["id"],),
@@ -475,7 +500,7 @@ class Store:
         """Restore the private brief for execution only, never API serialization."""
         brief = dict(request)
         for field in ("title", "context"):
-            values = [row[0] for row in c.execute(
+            values = [self.vault.decrypt_secret(row[0]) for row in c.execute(
                 "SELECT value FROM delegation_request_secrets WHERE request_id=? AND field=? ORDER BY position",
                 (request["id"], field),
             )]
@@ -505,7 +530,9 @@ class Store:
             "JOIN delegation_requests r ON r.child_turn_id=t.id WHERE r.parent_project_id=?",
             (project_id,),
         ))
-        return tuple({match[1] for value in values if (match := TOKEN_PATTERN.fullmatch(value))})
+        decoded = [self.vault.decrypt_secret(value) for value in values]
+        decoded.extend(self.vault.project_values(c, project_id))
+        return tuple({match[1] if (match := TOKEN_PATTERN.fullmatch(value)) else value for value in decoded if value})
 
     def file(self, row):
         return {

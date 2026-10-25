@@ -480,6 +480,24 @@ class Coordinator:
                             attached.append(item["relative_path"])
                     content = self.store.message_content(c, row)
                     secret_values = self.store.project_secret_values(c, project_id)
+                    governance = c.execute("SELECT data FROM governance_objects WHERE project_id=? AND kind='execution' AND json_extract(data,'$.turn_id')=?", (project_id, t["id"])).fetchone() if c.execute("SELECT 1 FROM sqlite_master WHERE name='governance_objects'").fetchone() else None
+                    read_only = bool(governance and json.loads(governance[0]).get("read_only"))
+                    resource_env = {}
+                    resource_error = None
+                    if governance:
+                        record = json.loads(governance[0])
+                        cid = record.get("credential_id")
+                        try:
+                            if cid and not read_only:
+                                allocation = c.execute("SELECT data FROM governance_objects WHERE id=? AND project_id=? AND kind='allocation'", (record.get("allocation_id"), project_id)).fetchone()
+                                account = json.loads(allocation[0]) if allocation else {}
+                                if account.get("status") != "active" or account.get("credential_id") != cid:
+                                    raise RuntimeError("The approved credential allocation is no longer active")
+                                value, metadata = self.store.vault.resolve_for_execution(c, project_id, cid, t["author_id"])
+                                resource_env = {"SHUI_RESOURCE_TOKEN": value, "SHUI_RESOURCE_ENDPOINT": metadata["endpoint"], "SHUI_RESOURCE_PROVIDER": metadata["provider"], "SHUI_RESOURCE_CREDENTIAL_ID": cid}
+                                secret_values = (*secret_values, value)
+                        except Exception as exc:
+                            resource_error = getattr(exc, "detail", None) or "Approved resource credentials are unavailable"
                     prompt = (
                         f"[Shui! shared paper project: {p['name']} | collaborator: {author['display_name']} (@{author['username']})]\n"
                         "Continue the existing project session. Other collaborators share this same history. "
@@ -529,6 +547,9 @@ class Coordinator:
                     )) if delegation else None
                 )
                 chunks = []
+
+                if read_only:
+                    prompt = prompt.replace("You are authorized to edit project files and run code or experiments with the host account permissions.", "This is read-only assistance. Do not modify files, approve resources, or perform external actions.")
 
                 redactor = _Redactor({}, secret_values)
 
@@ -632,6 +653,8 @@ class Coordinator:
                 try:
                     if delegation:
                         self._prepare_task_workspace(project_id, delegation["id"])
+                    if resource_error:
+                        raise RuntimeError(str(resource_error))
                     result = await self.runner(
                         RunRequest(
                             provider=project["provider"],
@@ -640,6 +663,8 @@ class Coordinator:
                             session_id=project["native_session_id"],
                             model=project["model"],
                             project_id=project_id,
+                            read_only=read_only,
+                            resource_env=resource_env,
                             secret_values=secret_values,
                         ),
                         emit,

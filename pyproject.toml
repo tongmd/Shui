@@ -3,7 +3,7 @@ name = "shui-collab"
 version = "0.1.0"
 description = "Shui! Shared coding-agent sessions for collaborative research."
 requires-python = ">=3.11"
-dependencies = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1", "python-multipart>=0.0.18,<1"]
+dependencies = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.30,<1", "python-multipart>=0.0.18,<1", "cryptography>=44,<51"]
 
 [project.urls]
 Homepage = "https://stonezhang.com/shui/"

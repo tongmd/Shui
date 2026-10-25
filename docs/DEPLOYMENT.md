@@ -109,3 +109,28 @@ password. Do not commit `.env`, databases, owner-login files, or native credenti
 
 Schema additions migrate automatically at startup. Back up SQLite before an
 upgrade; existing Owner credentials and native project bindings are preserved.
+
+## Resource records and encrypted credentials
+
+Keep `SHUI_DATA_DIR/vault/master.key` with the database when backing up or moving
+Shui. The key is created with mode 0600 in a private directory. Never commit it or
+publish it with a deployment archive. Restoring encrypted data without its original
+key fails closed; do not generate a replacement key over an existing vault.
+Stop Shui for a consistent backup and restore the database and key together.
+
+Owners configure project resource pools and may bind a pool to a project
+credential. Approved execution resolves that credential internally for the specific
+subprocess; browser APIs return metadata only. Rotation affects later resolution;
+revocation does not cancel already-running external work or revoke a provider's
+actual key. Revoke the key at its provider when required.
+
+Approvals conserve the recorded GPU-hour or token capacity. Consumption receipts
+are explicitly reported evidence, not a provider meter. Installed agents still run
+with the service account's host permissions: an allocation is not a GPU scheduler,
+a process sandbox, or a hard external billing limit. Use the provider's own quotas
+and an execution account with the intended machine access.
+
+Governance records and their hash chain persist independently of streamed agent
+events. Startup migrations add their tables without changing native session
+bindings. Verify ideas, approvals, credential inventory and a normal conversation
+after an upgrade, in addition to the existing membership/file/research flows.

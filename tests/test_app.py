@@ -198,7 +198,9 @@ def test_token_messages_are_stored_and_served_redacted(workspace):
         row = c.execute("SELECT * FROM messages WHERE id=?", (payload["message"]["id"],)).fetchone()
         assert row["content"] == "Use token:[redacted] to fetch the private result"
         assert app.state.store.message_content(c, row) == raw
-        assert c.execute("SELECT value FROM message_secrets WHERE message_id=?", (row["id"],)).fetchone()["value"] == "token:secret-token-123456789"
+        encrypted = c.execute("SELECT value FROM message_secrets WHERE message_id=?", (row["id"],)).fetchone()["value"]
+        assert "secret-token-123456789" not in encrypted
+        assert app.state.store.vault.decrypt_secret(encrypted) == "token:secret-token-123456789"
 
 
 def test_research_insights_aggregate_and_validate_figures(workspace):
